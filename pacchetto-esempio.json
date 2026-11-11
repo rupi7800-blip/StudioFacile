@@ -1,0 +1,37 @@
+{
+  "studiofacile": 1,
+  "materia": "Esempio · Fisiologia dell'esercizio",
+  "cfu": 6,
+  "lezioni": [
+    {
+      "numero": 1,
+      "titolo": "I sistemi energetici",
+      "riassunto": "## L'ATP, la moneta energetica\nIl muscolo usa solo **ATP** per contrarsi, ma ne ha pochissimo di riserva (2-3 secondi di sforzo massimale). Per questo deve rigenerarlo continuamente con tre sistemi.\n\n## I tre sistemi\n- **Anaerobico alattacido** (fosfocreatina): potenza massima, dura circa 10 secondi. Tipico di sprint e salti.\n- **Anaerobico lattacido** (glicolisi): da 10 secondi a circa 2 minuti, produce lattato.\n- **Aerobico** (ossidativo): più lento ma praticamente illimitato, usa carboidrati e grassi con l'ossigeno.\n\n> Slide 6: il grafico mostra le tre curve nel tempo. I sistemi non si accendono uno dopo l'altro: lavorano sempre insieme, cambia solo quale prevale.\n\n## Da ricordare\n- Più l'intensità è alta, più conta il sistema anaerobico.\n- Il recupero della fosfocreatina richiede circa 2-3 minuti.",
+      "crocette": [
+        { "domanda": "Qual è l'unica molecola usata direttamente dal muscolo per contrarsi?", "opzioni": ["Il glucosio", "La fosfocreatina", "L'ATP", "Il lattato"], "giusta": 2, "spiegazione": "Glucosio e fosfocreatina servono a rigenerare l'ATP, che è il carburante diretto." },
+        { "domanda": "Quanto dura circa il sistema anaerobico alattacido a intensità massimale?", "opzioni": ["Circa 10 secondi", "Circa 2 minuti", "Circa 10 minuti", "Circa 30 minuti"], "giusta": 0, "spiegazione": "La fosfocreatina si esaurisce in circa 10 secondi di sforzo massimale." },
+        { "domanda": "Quale sistema energetico produce lattato?", "opzioni": ["Alattacido", "Aerobico", "Ossidativo dei grassi", "Anaerobico lattacido"], "giusta": 3, "spiegazione": "La glicolisi anaerobica trasforma il piruvato in lattato." },
+        { "domanda": "Come lavorano i tre sistemi energetici durante l'esercizio?", "opzioni": ["Si accendono uno dopo l'altro", "Lavorano insieme, cambia quale prevale", "Lavora sempre e solo quello aerobico", "Si alternano ogni 30 secondi"], "giusta": 1, "spiegazione": "È il messaggio del grafico della slide 6." },
+        { "domanda": "Quale substrato NON è usato dal sistema aerobico?", "opzioni": ["I carboidrati", "I grassi", "La fosfocreatina", "L'ossigeno come comburente"], "giusta": 2, "spiegazione": "La fosfocreatina appartiene al sistema anaerobico alattacido." },
+        { "domanda": "In quanto tempo si recupera in gran parte la fosfocreatina?", "opzioni": ["In 10 secondi", "In 2-3 minuti", "In 2 ore", "In 24 ore"], "giusta": 1, "spiegazione": "Per questo tra uno sprint massimale e l'altro servono pause di qualche minuto." }
+      ],
+      "aperte": [
+        { "domanda": "Descrivi i tre sistemi energetici e il tipo di sforzo in cui prevale ciascuno.", "scaletta": ["Il muscolo usa ATP e deve rigenerarlo", "Alattacido: fosfocreatina, circa 10 secondi, sprint e salti", "Lattacido: glicolisi, fino a circa 2 minuti, produce lattato", "Aerobico: ossigeno, carboidrati e grassi, sforzi lunghi", "Lavorano sempre insieme, cambia quale prevale"] }
+      ]
+    },
+    {
+      "numero": 2,
+      "titolo": "Le fibre muscolari",
+      "riassunto": "## Due grandi famiglie\n- **Fibre lente (tipo I)**: rosse, ricche di mitocondri e capillari, resistono alla fatica. Prevalgono negli sport di resistenza.\n- **Fibre veloci (tipo II)**: bianche, forti e rapide ma si stancano presto. Si dividono in IIa (intermedie) e IIx (le più veloci).\n\n> Slide 9: la foto al microscopio mostra le fibre colorate: quelle scure sono le lente, ricche di enzimi ossidativi.\n\n## Il reclutamento\nLe unità motorie si attivano **dalle più piccole alle più grandi** (principio di Henneman): prima le lente, poi le veloci solo quando serve più forza.",
+      "crocette": [
+        { "domanda": "Quali fibre sono più resistenti alla fatica?", "opzioni": ["Le fibre IIx", "Le fibre IIa", "Le fibre di tipo I", "Hanno tutte la stessa resistenza"], "giusta": 2, "spiegazione": "Le fibre di tipo I sono ricche di mitocondri e usano il sistema aerobico." },
+        { "domanda": "Cosa afferma il principio di Henneman?", "opzioni": ["Le unità motorie si reclutano dalle più piccole alle più grandi", "Le fibre veloci si attivano sempre per prime", "Tutte le fibre si attivano insieme", "Il reclutamento dipende solo dalla temperatura"], "giusta": 0, "spiegazione": "Prima le piccole e lente, poi le grandi e veloci quando serve più forza." },
+        { "domanda": "Perché le fibre lente appaiono rosse?", "opzioni": ["Perché contengono più lattato", "Perché hanno meno capillari", "Perché sono più grandi", "Per l'abbondanza di mioglobina e capillari"], "giusta": 3, "spiegazione": "Mioglobina e capillarizzazione danno il colore rosso." },
+        { "domanda": "Quale tipo di fibra è il più veloce?", "opzioni": ["Tipo I", "Tipo IIx", "Tipo IIa", "Tipo III"], "giusta": 1, "spiegazione": "Le IIx sono le più rapide e potenti, ma le meno resistenti." }
+      ],
+      "aperte": [
+        { "domanda": "Confronta fibre lente e veloci e spiega come vengono reclutate.", "scaletta": ["Tipo I: lente, rosse, mitocondri, resistenti", "Tipo II: veloci, forti, si affaticano presto (IIa e IIx)", "Sport di resistenza e di potenza", "Principio di Henneman: dalle piccole alle grandi"] }
+      ]
+    }
+  ]
+}
