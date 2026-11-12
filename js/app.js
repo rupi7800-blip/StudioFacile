@@ -52,6 +52,12 @@ const ICONS = {
   refresh: '<path d="M21 12a9 9 0 1 1-2.6-6.4"/><path d="M21 3v6h-6"/>',
   edit: '<path d="M4 20h4L19 9l-4-4L4 16z"/>',
   speaker: '<path d="M4 9v6h4l5 4V5L8 9z"/><path d="M16 9a4 4 0 0 1 0 6M18.5 6.5a8 8 0 0 1 0 11"/>',
+  sun: '<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/>',
+  list: '<path d="M9 6h11M9 12h11M9 18h11"/><circle cx="4.5" cy="6" r="1"/><circle cx="4.5" cy="12" r="1"/><circle cx="4.5" cy="18" r="1"/>',
+  pen: '<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/>',
+  file: '<path d="M14 3H6v18h12V7z"/><path d="M14 3v4h4"/>',
+  image: '<rect x="3" y="3" width="18" height="18" rx="3"/><circle cx="9" cy="9" r="2"/><path d="m21 15-5-5L5 21"/>',
+  copy: '<rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/>',
   eye: '<path d="M2 12s4-7 10-7 10 7 10 7-4 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/>'
 };
 const I = (n, cls) => `<svg class="i ${cls || ''}" viewBox="0 0 24 24" aria-hidden="true">${ICONS[n] || ''}</svg>`;
@@ -89,13 +95,73 @@ async function salvaOra() {
   }
 }
 
+/* immagini (appunti, foto, pagine dei PDF): salvate a parte per non appesantire lo stato */
+async function imgPut(id, dataUrl) {
+  try { const db = await idb(); await new Promise((ok, ko) => { const t = db.transaction('kv', 'readwrite'); t.objectStore('kv').put(dataUrl, 'img:' + id); t.oncomplete = ok; t.onerror = () => ko(t.error); }); return true; }
+  catch (e) { toast('Non riesco a salvare l\'immagine'); return false; }
+}
+async function imgGet(id) {
+  try { const db = await idb(); return await new Promise(ok => { const t = db.transaction('kv').objectStore('kv').get('img:' + id); t.onsuccess = () => ok(t.result || null); t.onerror = () => ok(null); }); }
+  catch (e) { return null; }
+}
+async function imgDel(id) { try { const db = await idb(); db.transaction('kv', 'readwrite').objectStore('kv').delete('img:' + id); } catch (e) { /* no */ } }
+function riduciImmagine(src, max) {
+  return new Promise((ok, ko) => {
+    const im = new Image();
+    im.onload = () => {
+      const k = Math.min(1, (max || 1600) / Math.max(im.width, im.height));
+      const c = document.createElement('canvas'); c.width = Math.round(im.width * k); c.height = Math.round(im.height * k);
+      const g = c.getContext('2d'); g.fillStyle = '#fff'; g.fillRect(0, 0, c.width, c.height); g.drawImage(im, 0, 0, c.width, c.height);
+      ok(c.toDataURL('image/jpeg', 0.8));
+    };
+    im.onerror = () => ko(new Error('immagine non leggibile'));
+    im.src = src;
+  });
+}
+const leggiFileUrl = f => new Promise((ok, ko) => { const r = new FileReader(); r.onload = () => ok(r.result); r.onerror = () => ko(r.error); r.readAsDataURL(f); });
+const caricati = {};
+function caricaScript(src) {
+  return caricati[src] || (caricati[src] = new Promise((ok, ko) => { const x = document.createElement('script'); x.src = src; x.onload = ok; x.onerror = () => { delete caricati[src]; ko(new Error('serve la connessione la prima volta')); }; document.head.appendChild(x); }));
+}
+async function testoDaPdf(file, avanzamento) {
+  await caricaScript('js/lib/pdf.min.js');
+  const lib = window.pdfjsLib; lib.GlobalWorkerOptions.workerSrc = 'js/lib/pdf.worker.min.js';
+  const doc = await lib.getDocument({ data: await file.arrayBuffer() }).promise;
+  const pagine = [];
+  for (let i = 1; i <= doc.numPages; i++) {
+    const pg = await doc.getPage(i), tc = await pg.getTextContent();
+    let t = '', y = null;
+    tc.items.forEach(it => { const yy = it.transform ? it.transform[5] : 0; if (y !== null && Math.abs(yy - y) > 4) t += '\n'; else if (t && !t.endsWith(' ')) t += ' '; t += it.str; y = yy; });
+    pagine.push(t.replace(/[ \t]+/g, ' ').replace(/\n\s*\n+/g, '\n').trim());
+    if (avanzamento) avanzamento(i, doc.numPages);
+  }
+  return { doc, pagine };
+}
+async function paginePdfComeImmagini(doc, max, avanzamento) {
+  const out = [];
+  for (let i = 1; i <= Math.min(doc.numPages, max || 60); i++) {
+    const pg = await doc.getPage(i), v0 = pg.getViewport({ scale: 1 }), k = 1300 / Math.max(v0.width, v0.height), v = pg.getViewport({ scale: k });
+    const c = document.createElement('canvas'); c.width = v.width; c.height = v.height;
+    await pg.render({ canvasContext: c.getContext('2d'), viewport: v }).promise;
+    out.push({ nome: 'Pagina ' + i, dataUrl: c.toDataURL('image/jpeg', 0.75) });
+    if (avanzamento) avanzamento(i, Math.min(doc.numPages, max || 60));
+  }
+  return out;
+}
+async function testoDaDocx(file) {
+  await caricaScript('js/lib/mammoth.browser.min.js');
+  const r = await window.mammoth.extractRawText({ arrayBuffer: await file.arrayBuffer() });
+  return r.value.replace(/\n{3,}/g, '\n\n').trim();
+}
+
 function statoVuoto() {
   return {
     v: 1,
-    imp: { nome: '', minuti: 30, oraStudio: '20:30', studioInAgenda: false, totCfu: 180, avvisoGiorni: 3, voceVel: 1, notifiche: false,
+    imp: { nome: '', minuti: 30, oraStudio: '20:30', sedute: 1, orari: ['20:30', '07:30', '13:00'], giorni: [0, 1, 2, 3, 4, 5, 6], studioInAgenda: false, totCfu: 180, avvisoGiorni: 3, voceVel: 1, voceNome: '', notifiche: false,
       email: { url: '', codice: '', mittenti: [], giorni: 60, ultimo: 0 } },
     materie: [], focus: '', lezioni: [], crocette: [], aperte: [], srs: {}, sim: [], log: {},
-    oggi: { data: '', fatti: {} }, scad: [], posta: [], notificati: {}
+    oggi: { data: '', fatti: {}, lette: [], forza: false }, scad: [], posta: [], notificati: {},
+    tesi: null
   };
 }
 let S = statoVuoto();
@@ -150,30 +216,55 @@ function piano(m) {
   if (nonLette.length && nonLette.length > lez.length / 2 && fase > 1) fase = 1;
   return { es, fine, tot, passati, mancano, fase, lez, nonLette, settimana: Math.floor(passati / 7) + 1, senzaData: !es };
 }
+const giornoStudio = (d) => (S.imp.giorni || [0, 1, 2, 3, 4, 5, 6]).includes(pd(d || oggi()).getDay());
+const ORARI_DEF = { 1: ['20:30'], 2: ['07:30', '20:30'], 3: ['07:30', '13:00', '20:30'] };
+const orarioSeduta = i => {
+  const N = Math.max(1, Math.min(3, +S.imp.sedute || 1));
+  if (S.imp.orariMod && (S.imp.orari || [])[i]) return S.imp.orari[i];
+  return (N === 1 ? S.imp.oraStudio : null) || ORARI_DEF[N][i] || '20:30';
+};
+/** Le sedute di oggi: ognuna dura S.imp.minuti; ritorna { p, passi (tutti), sedute: [{ i, ora, passi }] } */
 function passiDiOggi(m) {
-  const p = piano(m), M = S.imp.minuti || 30, k = M / 30;
-  const cro = croDi(m.id), ape = apeDi(m.id), passi = [];
-  if (!p.lez.length && !cro.length) return { p, passi: [{ id: 'import', tipo: 'import', titolo: 'Importa il primo pacchetto', desc: 'Carica le slide in Claude e incolla qui il pacchetto' }] };
-  const lettura = n => {
-    // la lezione letta oggi resta nella seduta (segnata come fatta), non salta alla successiva
-    const giaOggi = S.oggi.data === oggi() && Object.keys(S.oggi.fatti).map(k => k.indexOf('let-') === 0 && p.lez.find(x => 'let-' + x.id === k)).find(Boolean);
-    const l = giaOggi || p.nonLette[0];
-    if (l) passi.push({ id: 'let-' + l.id, tipo: 'lettura', lid: l.id, titolo: 'Leggi o ascolta: ' + l.titolo, desc: 'Riassunto · circa ' + Math.round(15 * k) + ' minuti' });
-    return !!l;
-  };
-  const crocette = n => { n = Math.min(Math.round(n * k), scegliCrocette(m.id, Math.round(n * k)).length); if (cro.length && n > 0) passi.push({ id: 'cro', tipo: 'crocette', n, titolo: n + ' crocette', desc: 'Ripasso intelligente · circa ' + n + ' minuti' }); };
-  const aperte = n => { n = Math.max(1, Math.round(n * k)); if (ape.length) passi.push({ id: 'ape', tipo: 'aperte', n, titolo: n + ' domand' + (n === 1 ? 'a aperta' : 'e aperte') + ' a voce', desc: 'Rispondi ad alta voce, poi confronta · circa ' + n * 4 + ' minuti' }); };
-  const simula = () => { if (cro.length >= 10) passi.push({ id: 'sim', tipo: 'sim', titolo: 'Simulazione d\'esame', desc: Math.min(m.simN, cro.length) + ' crocette in ' + m.simMin + ' minuti, voto stimato' }); };
+  const p = piano(m), k = (S.imp.minuti || 30) / 30, N = Math.max(1, Math.min(3, +S.imp.sedute || 1));
+  const cro = croDi(m.id), ape = apeDi(m.id);
+  if (!p.lez.length && !cro.length) {
+    const imp = { id: 'import', tipo: 'import', titolo: 'Importa il primo pacchetto', desc: 'Carica le slide in Claude, oppure i tuoi appunti o un file' };
+    return { p, passi: [imp], sedute: [{ i: 0, ora: orarioSeduta(0), passi: [imp] }] };
+  }
+  // lezioni da leggere oggi, nell'ordine: prima quelle già lette oggi (restano nella loro seduta), poi le non lette
+  const ids = new Set(p.lez.map(l => l.id));
+  const letteOggi = (S.oggi.data === oggi() ? S.oggi.lette || [] : []).filter(id => ids.has(id)).map(id => p.lez.find(l => l.id === id));
+  const cand = letteOggi.concat(p.nonLette.filter(l => !letteOggi.includes(l)));
+  let iLet = 0, simFatta = false;
   const pari = diffD('2026-01-01', oggi()) % 2 === 0;
-  if (p.fase === 0) { const ok = lettura(); crocette(ok ? 12 : 22); if (!ok) aperte(2); }
-  else if (p.fase === 1) { const ok = lettura(); crocette(ok ? 14 : 22); if (!ok) aperte(2); }
-  else if (p.fase === 2) { if (!lettura()) aperte(4); crocette(14); }
-  else { if (pari || p.mancano <= 3) { simula(); aperte(1); } else { aperte(3); crocette(16); } if (!passi.length) crocette(25); }
-  return { p, passi };
+  const sedute = [];
+  for (let s = 0; s < N; s++) {
+    const suf = s ? '-' + (s + 1) : '', passi = [];
+    const lettura = () => {
+      const l = cand[iLet]; if (!l) return false; iLet++;
+      passi.push({ id: 'let-' + l.id, tipo: 'lettura', lid: l.id, titolo: 'Leggi o ascolta: ' + l.titolo, desc: 'Riassunto · circa ' + Math.round(15 * k) + ' minuti' });
+      return true;
+    };
+    const crocette = n => { n = Math.round(n * k); n = Math.min(n, scegliCrocette(m.id, n).length); if (cro.length && n > 0) passi.push({ id: 'cro' + suf, tipo: 'crocette', n, titolo: n + ' crocette', desc: 'Ripasso intelligente · circa ' + n + ' minuti' }); };
+    const aperte = n => { n = Math.max(1, Math.round(n * k)); if (ape.length) passi.push({ id: 'ape' + suf, tipo: 'aperte', n, titolo: n + ' domand' + (n === 1 ? 'a aperta' : 'e aperte') + ' a voce', desc: 'Rispondi ad alta voce, poi confronta · circa ' + n * 4 + ' minuti' }); };
+    const simula = () => { if (cro.length >= 10 && !simFatta) { simFatta = true; passi.push({ id: 'sim', tipo: 'sim', titolo: 'Simulazione d\'esame', desc: Math.min(m.simN, cro.length) + ' crocette in ' + m.simMin + ' minuti, voto stimato' }); return true; } return false; };
+    if (p.fase === 0) { const ok = lettura(); crocette(ok ? 12 : 22); if (!ok) aperte(2); }
+    else if (p.fase === 1) { const ok = lettura(); crocette(ok ? 14 : 22); if (!ok) aperte(2); }
+    else if (p.fase === 2) { if (!lettura()) aperte(4); crocette(14); }
+    else { if ((pari || p.mancano <= 3) && simula()) aperte(1); else { aperte(3); crocette(16); } }
+    if (!passi.length) crocette(25);
+    if (!passi.length) {
+      // niente di nuovo per questa seduta: ripasso di una lezione già letta (quella vista meno di recente)
+      const gia = p.lez.filter(l => l.letta || letteOggi.includes(l)).sort((a, b) => (a.ripasso || 0) - (b.ripasso || 0))[s % Math.max(1, p.lez.length)] || p.lez[0];
+      if (gia) passi.push({ id: 'rip-' + gia.id + suf, tipo: 'lettura', lid: gia.id, titolo: 'Ripassa: ' + gia.titolo, desc: 'Rileggi o riascolta · circa ' + Math.round(15 * k) + ' minuti' });
+    }
+    sedute.push({ i: s, ora: orarioSeduta(s), passi });
+  }
+  return { p, passi: [].concat(...sedute.map(x => x.passi)), sedute };
 }
 function fattoOggi(stepId) { return S.oggi.data === oggi() && !!S.oggi.fatti[stepId]; }
 function segnaFatto(stepId) {
-  if (S.oggi.data !== oggi()) S.oggi = { data: oggi(), fatti: {} };
+  if (S.oggi.data !== oggi()) S.oggi = { data: oggi(), fatti: {}, lette: [], forza: false };
   S.oggi.fatti[stepId] = true;
 }
 function registra(mid, campi) {
@@ -182,9 +273,14 @@ function registra(mid, campi) {
   l.mid = mid;
 }
 function serie() {
-  let n = 0, d = oggi();
+  // conta i giorni di studio di fila; i giorni liberi scelti da te non interrompono la serie
+  let n = 0, d = oggi(), giri = 0;
   if (!attivo(d)) d = addD(d, -1);
-  while (attivo(d)) { n++; d = addD(d, -1); }
+  while (giri++ < 400) {
+    if (attivo(d)) n++;
+    else if (giornoStudio(d)) break;
+    d = addD(d, -1);
+  }
   return n;
   function attivo(x) { const l = S.log[x]; return !!(l && (l.min >= 5 || l.croc || l.lette || l.aperte || l.sim)); }
 }
@@ -276,6 +372,7 @@ const TIPI_S = {
   appello: { label: 'Prenotazione appello', icon: 'flag', agenda: 'scadenza', colore: '#cf4b3f' },
   esame: { label: 'Esame', icon: 'cap', agenda: 'appuntamento', colore: '#2f6f5e' },
   lezione: { label: 'Lezione di approfondimento', icon: 'video', agenda: 'appuntamento', colore: '#3b6fd8' },
+  tesi: { label: 'Tesi', icon: 'pen', agenda: 'scadenza', colore: '#c4912a' },
   altro: { label: 'Altro', icon: 'dots', agenda: 'scadenza', colore: '#76807b' }
 };
 function prossime(giorni) {
@@ -388,9 +485,14 @@ function controllaPromemoria() {
   }
   const ora = new Date(), hm = pad(ora.getHours()) + ':' + pad(ora.getMinutes());
   const m = materiaAttiva();
-  if (m && hm >= S.imp.oraStudio && !S.notificati['studio@' + oggi()]) {
-    const { passi } = passiDiOggi(m);
-    if (passi.some(p => !fattoOggi(p.id))) { S.notificati['studio@' + oggi()] = Date.now(); cambiato = true; notifica('È il momento dei tuoi ' + S.imp.minuti + ' minuti', m.nome + ': la seduta di oggi ti aspetta', 'studio'); }
+  if (m && giornoStudio()) {
+    const { sedute } = passiDiOggi(m);
+    sedute.forEach(sd => {
+      const k = 'studio@' + oggi() + '#' + sd.i;
+      if (hm < sd.ora || S.notificati[k] || sd.passi.every(p => fattoOggi(p.id))) return;
+      S.notificati[k] = Date.now(); cambiato = true;
+      notifica('È il momento dei tuoi ' + S.imp.minuti + ' minuti', m.nome + (sedute.length > 1 ? ': seduta ' + (sd.i + 1) + ' di ' + sedute.length : ': la seduta di oggi ti aspetta'), 'studio');
+    });
   }
   if (cambiato) {
     const lim = Date.now() - 60 * 86400000;
@@ -405,7 +507,7 @@ function toast(t, ms) {
   const el = $('#toast'); el.textContent = t; el.classList.add('on');
   clearTimeout(toast.t); toast.t = setTimeout(() => el.classList.remove('on'), ms || 2800);
 }
-const TABS = [['oggi', 'Oggi', 'home'], ['materie', 'Materie', 'book'], ['scadenze', 'Scadenze', 'cal'], ['altro', 'Impostazioni', 'gear']];
+const TABS = [['oggi', 'Oggi', 'home'], ['libretto', 'Libretto', 'book'], ['scadenze', 'Scadenze', 'cal'], ['tesi', 'Tesi', 'cap'], ['altro', 'Altro', 'gear']];
 function renderTab() {
   const n = postaNuove() + scaduteNonFatte().length;
   $('#tabbar').innerHTML = TABS.map(([id, lbl, ic]) => `<button class="tab ${ui.tab === id ? 'on' : ''}" data-act="tab" data-v="${id}">${I(ic)}${lbl}${id === 'scadenze' && n ? `<span class="dot">${n}</span>` : ''}</button>`).join('');
@@ -414,7 +516,7 @@ function renderTab() {
 }
 function render() {
   renderTab();
-  const v = { oggi: vOggi, materie: ui.apertaMateria ? vMateria : vMaterie, scadenze: vScadenze, altro: vAltro }[ui.tab];
+  const v = { oggi: vOggi, libretto: ui.apertaMateria ? vMateria : vLibretto, scadenze: vScadenze, tesi: vTesi, altro: vAltro }[ui.tab] || vOggi;
   $('#view').innerHTML = v();
 }
 
@@ -424,7 +526,8 @@ function vOggi() {
   const nome = S.imp.nome ? ', ' + esc(S.imp.nome) : '';
   const h = new Date().getHours();
   const saluto = (h < 13 ? 'Buongiorno' : h < 18 ? 'Buon pomeriggio' : 'Buonasera') + nome;
-  let html = `<div class="hello"><h1>${saluto}</h1><p>${S.imp.minuti} minuti oggi, e un esame alla volta.</p></div>`;
+  const N = Math.max(1, Math.min(3, +S.imp.sedute || 1));
+  let html = `<div class="hello"><h1>${saluto}</h1><p>${giornoStudio() || (S.oggi.data === oggi() && S.oggi.forza) ? (N > 1 ? N + ' sedute da ' + S.imp.minuti + ' minuti' : S.imp.minuti + ' minuti') + ' oggi, e un esame alla volta.' : 'Oggi è giorno libero.'}</p></div>`;
   html += bannerScadenze();
   if (!m) {
     if (!S.materie.length) return html + `<div class="card empty"><h3>Iniziamo dal primo esame</h3><p>Scegli l'esame più facile, non il più importante. Aggiungilo e importa il pacchetto che ti preparo da Claude.</p>
@@ -432,8 +535,9 @@ function vOggi() {
       <p class="small" style="margin-top:14px">Vuoi provare subito? <button class="btn ghost sm" data-act="esempio">Carica un esempio</button></p></div>` + vProgressi();
     return html + `<div class="card empty"><h3>Nessun esame in corso</h3><p>Hai superato tutto quello che avevi in lista. Aggiungi il prossimo esame.</p><div class="btns"><button class="btn pri" data-act="materia-nuova">${I('plus')}Prossimo esame</button></div></div>` + vProgressi();
   }
-  const { p, passi } = passiDiOggi(m);
+  const { p, passi, sedute } = passiDiOggi(m);
   const fatti = passi.filter(x => fattoOggi(x.id)).length;
+  const libero = !giornoStudio() && !(S.oggi.data === oggi() && S.oggi.forza);
   html += `<div class="card hero">
     <div class="row"><div class="g"><span class="chip">${p.senzaData ? 'Piano di 4 settimane' : 'Settimana ' + Math.min(p.settimana, Math.ceil(p.tot / 7)) + ' di ' + Math.ceil(p.tot / 7)}</span><h2 style="margin-top:8px">${esc(m.nome)}</h2>
     <p class="sub">${p.es ? 'Esame ' + fData(p.es.data, true) + (p.es.ora ? ' alle ' + p.es.ora : '') : 'Nessuna data d\'esame ancora'}</p></div></div>
@@ -442,13 +546,24 @@ function vOggi() {
     <div class="phase-lbl"><span>Fase: ${FASI[p.fase]}</span><span>${FASI[Math.min(3, p.fase + 1)] !== FASI[p.fase] ? 'poi ' + FASI[p.fase + 1] : 'ultimo tratto'}</span></div>
     ${p.senzaData ? `<div class="btns"><button class="btn acc sm" data-act="esame-data" data-id="${m.id}">${I('cal')}Imposta la data dell'esame</button></div>` : ''}
   </div>`;
-  html += `<div class="sec-t"><h2>La seduta di oggi</h2><span class="muted small">${fatti}/${passi.length} fatti</span></div>`;
-  html += passi.map((x, i) => {
+  const btnPasso = x => {
     const done = fattoOggi(x.id);
     return `<button class="step ${done ? 'done' : ''}" data-act="passo" data-v="${x.id}"><span class="n">${done ? I('check') : I({ lettura: 'read', crocette: 'quiz', aperte: 'mic', sim: 'timer', import: 'upload' }[x.tipo])}</span>
       <span class="g" style="flex:1;min-width:0"><b>${esc(x.titolo)}</b><span>${esc(x.desc)}</span></span>${done ? '' : I('next', 'go')}</button>`;
-  }).join('');
-  if (passi.length && fatti === passi.length) html += `<div class="allset">${I('check')}Seduta completata. Domani si riparte da qui: ${serie()} giorn${serie() === 1 ? 'o' : 'i'} di fila.</div>`;
+  };
+  if (libero) {
+    html += `<div class="card"><div class="light giallo"><span class="bulb">${I('sun')}</span><div class="g"><h3>Oggi è giorno libero</h3><p class="sub">L'hai scelto tu nelle impostazioni. Riposare fa parte del piano.</p></div></div>
+      <div class="btns"><button class="btn" data-act="studia-comunque">${I('read')}Studio lo stesso</button></div></div>`;
+  } else if (sedute.length === 1) {
+    html += `<div class="sec-t"><h2>La seduta di oggi</h2><span class="muted small">${fatti}/${passi.length} fatti</span></div>` + passi.map(btnPasso).join('');
+  } else {
+    html += `<div class="sec-t"><h2>Le ${sedute.length} sedute di oggi</h2><span class="muted small">${fatti}/${passi.length} fatti</span></div>`;
+    html += sedute.map(sd => {
+      const ok = sd.passi.every(x => fattoOggi(x.id));
+      return `<div class="seduta"><div class="seduta-h"><b>Seduta ${sd.i + 1}</b><span class="chip ${ok ? 'ok' : ''}">${ok ? 'fatta' : 'alle ' + esc(sd.ora)}</span></div>${sd.passi.map(btnPasso).join('')}</div>`;
+    }).join('');
+  }
+  if (!libero && passi.length && fatti === passi.length) html += `<div class="allset">${I('check')}${sedute.length > 1 ? 'Sedute completate' : 'Seduta completata'}. ${serie()} giorn${serie() === 1 ? 'o' : 'i'} di studio di fila.</div>`;
   const pr = pronto(m.id);
   html += `<div class="card"><div class="light ${pr.c}"><span class="bulb">${I(pr.c === 'verde' ? 'check' : 'timer')}</span><div class="g"><h3>${pr.t}</h3><p class="sub">${pr.d}</p></div></div>
     ${pr.c === 'verde' && !p.es ? `<div class="btns"><button class="btn ok" data-act="esame-data" data-id="${m.id}">${I('cal')}Ho prenotato: inserisci la data</button></div>` : ''}</div>`;
@@ -467,46 +582,91 @@ function bannerScadenze() {
   return h;
 }
 function vProgressi() {
-  const sup = S.materie.filter(m => m.stato === 'superato');
-  const cfu = sup.reduce((a, m) => a + (+m.cfu || 0), 0), tot = +S.imp.totCfu || 180;
-  const media = sup.filter(m => +m.voto).length ? (sup.reduce((a, m) => a + (+m.voto || 0), 0) / sup.filter(m => +m.voto).length).toFixed(1) : '—';
+  const md = medie(), tot = +S.imp.totCfu || 180;
   let minSett = 0; for (let i = 0; i < 7; i++) minSett += (S.log[addD(oggi(), -i)] || {}).min || 0;
-  return `<div class="sec-t"><h2>I tuoi progressi</h2></div><div class="card"><div class="stats">
-    <div class="stat"><b>${sup.length}</b><span>esami passati</span></div><div class="stat"><b>${cfu}</b><span>CFU su ${tot}</span></div><div class="stat"><b>${Math.round(minSett)}'</b><span>studio in 7 giorni</span></div></div>
-    <div class="bar"><i style="width:${Math.min(100, cfu / tot * 100)}%"></i></div><p class="sub" style="margin-top:8px">${sup.length ? 'Media ' + media + ' · ' : ''}${Math.round(cfu / tot * 100)}% del percorso</p></div>`;
+  return `<div class="sec-t"><h2>I tuoi progressi</h2><button class="lnk" data-act="tab" data-v="libretto">Libretto</button></div><div class="card"><div class="stats">
+    <div class="stat"><b>${md.sup.length}</b><span>esami passati</span></div><div class="stat"><b>${md.cfuTot}</b><span>CFU su ${tot}</span></div><div class="stat"><b>${Math.round(minSett)}'</b><span>studio in 7 giorni</span></div></div>
+    <div class="bar"><i style="width:${Math.min(100, md.cfuTot / tot * 100)}%"></i></div><p class="sub" style="margin-top:8px">${md.pond ? 'Media ponderata ' + md.pond.toFixed(2) + ' · ' : ''}${Math.round(md.cfuTot / tot * 100)}% del percorso</p></div>`;
 }
 
 /* ----- Materie ----- */
-function vMaterie() {
-  const gruppi = [['studio', 'In preparazione'], ['pausa', 'Da fare più avanti'], ['superato', 'Superati']];
-  let h = `<div class="hello"><h1>Materie</h1><p>Un esame alla volta: il primo superato riaccende la motivazione.</p></div>
-    <div class="btns" style="margin-top:0"><button class="btn pri" data-act="materia-nuova">${I('plus')}Nuovo esame</button><button class="btn" data-act="importa">${I('upload')}Importa pacchetto</button></div>`;
-  if (!S.materie.length) return h + `<div class="card empty"><h3>Ancora nessun esame</h3><p>Aggiungi un esame o importa direttamente un pacchetto: la materia si crea da sola.</p><button class="btn ghost" data-act="esempio">Carica un esempio per provare</button></div>`;
-  for (const [st, lbl] of gruppi) {
-    const ms = S.materie.filter(m => m.stato === st);
+const STATI = { studio: 'In preparazione', pausa: 'Da sostenere', superato: 'Superato' };
+const votoTxt = m => m.valutazione === 'idoneita' ? 'Idoneo' : m.voto ? (+m.voto >= 30 && m.lode ? '30L' : m.voto) : '—';
+function medie() {
+  const sup = S.materie.filter(m => m.stato === 'superato');
+  const conVoto = sup.filter(m => m.valutazione !== 'idoneita' && +m.voto >= 18);
+  const cfuTot = sup.reduce((a, m) => a + (+m.cfu || 0), 0) + (S.tesi && S.tesi.stato === 'discussa' ? +S.tesi.cfu || 0 : 0);
+  const v = m => Math.min(30, +m.voto); // la lode vale 30 nelle medie
+  const arit = conVoto.length ? conVoto.reduce((a, m) => a + v(m), 0) / conVoto.length : 0;
+  const pesoTot = conVoto.reduce((a, m) => a + (+m.cfu || 0), 0);
+  const pond = pesoTot ? conVoto.reduce((a, m) => a + v(m) * (+m.cfu || 0), 0) / pesoTot : 0;
+  return { sup, conVoto, cfuTot, arit, pond, base: pond * 110 / 30, lodi: conVoto.filter(m => m.lode && +m.voto >= 30).length };
+}
+function vLibretto() {
+  const f = ui.filtro || 'tutti', md = medie(), tot = +S.imp.totCfu || 180;
+  const cfuPiano = S.materie.reduce((a, m) => a + (+m.cfu || 0), 0) + (S.tesi ? +S.tesi.cfu || 0 : 0);
+  let h = `<div class="hello"><h1>Libretto</h1><p>Il tuo piano di studi: materie, CFU, esami passati e voti.</p></div>
+    <div class="card"><div class="stats"><div class="stat"><b>${md.sup.length}<small style="font-size:14px;opacity:.6">/${S.materie.length}</small></b><span>esami passati</span></div><div class="stat"><b>${md.cfuTot}</b><span>CFU su ${tot}</span></div><div class="stat"><b>${md.pond ? md.pond.toFixed(2) : '—'}</b><span>media ponderata</span></div></div>
+    <div class="bar"><i style="width:${Math.min(100, md.cfuTot / tot * 100)}%"></i></div>
+    <div class="libro-tot"><span>Media aritmetica <b>${md.arit ? md.arit.toFixed(2) : '—'}</b></span><span>Base di laurea <b>${md.pond ? md.base.toFixed(1) + '/110' : '—'}</b></span>${md.lodi ? `<span>Lodi <b>${md.lodi}</b></span>` : ''}</div>
+    ${cfuPiano && cfuPiano !== tot ? `<p class="small muted" style="margin:8px 0 0">Nel piano hai inserito ${cfuPiano} CFU su ${tot}${cfuPiano < tot ? ': aggiungi le materie che mancano.' : '.'}</p>` : ''}</div>
+    <div class="btns" style="margin-top:0"><button class="btn pri" data-act="materia-nuova">${I('plus')}Materia</button><button class="btn" data-act="piano-incolla">${I('list')}Piano di studi</button><button class="btn" data-act="importa">${I('upload')}Importa</button></div>`;
+  if (!S.materie.length) return h + `<div class="card empty"><h3>Il libretto è vuoto</h3><p>Incolla il tuo piano di studi (lo trovi nell'area studenti) o aggiungi le materie una alla volta. Per gli esami già passati inserisci il voto.</p><button class="btn ghost" data-act="esempio">Oppure carica un esempio</button></div>`;
+  h += `<div class="seg filtri">${[['tutti', 'Tutte'], ['studio', 'In preparazione'], ['pausa', 'Da sostenere'], ['superato', 'Superati']].map(([v, l]) => `<button data-act="filtro" data-v="${v}" class="${f === v ? 'on' : ''}">${l} <span>${v === 'tutti' ? S.materie.length : S.materie.filter(m => m.stato === v).length}</span></button>`).join('')}</div>`;
+  const anni = [...new Set(S.materie.map(m => m.anno || ''))].sort((a, b) => (a || '9').localeCompare(b || '9'));
+  for (const anno of anni) {
+    const ms = S.materie.filter(m => (m.anno || '') === anno && (f === 'tutti' || m.stato === f))
+      .sort((a, b) => ['studio', 'pausa', 'superato'].indexOf(a.stato) - ['studio', 'pausa', 'superato'].indexOf(b.stato) || a.nome.localeCompare(b.nome));
     if (!ms.length) continue;
-    h += `<div class="sec-t"><h2>${lbl}</h2></div>` + ms.map(m => {
-      const lez = lezDi(m.id), cro = croDi(m.id), es = esameDi(m.id), pr = st === 'studio' ? pronto(m.id) : null;
-      return `<button class="subj" data-act="materia" data-id="${m.id}"><div class="top-l"><span class="dotc" style="background:${m.colore}"></span><h3>${esc(m.nome)}</h3>${m.id === S.focus && st === 'studio' ? '<span class="chip brand">attivo</span>' : ''}</div>
-        <div class="meta">${m.cfu ? `<span class="chip">${m.cfu} CFU</span>` : ''}${st === 'superato' ? `<span class="chip ok">${m.voto ? m.voto + '/30' : 'superato'}</span>` : `<span class="chip">${lez.filter(l => l.letta).length}/${lez.length} lezioni</span><span class="chip">${cro.length} crocette</span>`}
-        ${es ? `<span class="chip warn">esame ${fData(es.data)}</span>` : ''}${pr ? `<span class="chip ${pr.c === 'verde' ? 'ok' : pr.c === 'giallo' ? 'warn' : ''}">${pr.perc}% consolidato</span>` : ''}</div></button>`;
-    }).join('');
+    const cfuA = ms.reduce((a, m) => a + (+m.cfu || 0), 0);
+    h += `<div class="sec-t"><h2>${anno ? anno + '° anno' : anni.length > 1 ? 'Anno non indicato' : 'Materie'}</h2><span class="muted small">${cfuA} CFU</span></div><div class="card libro">` + ms.map(m => {
+      const es = esameDi(m.id), pr = m.stato === 'studio' ? pronto(m.id) : null;
+      return `<button class="riga" data-act="materia" data-id="${m.id}"><span class="dotc" style="background:${m.colore}"></span>
+        <span class="g"><b>${esc(m.nome)}</b><span>${m.cfu ? m.cfu + ' CFU' : 'CFU ?'} · ${m.stato === 'superato' ? (m.dataSup ? 'superato il ' + fData(m.dataSup) : 'superato') : STATI[m.stato] + (es ? ' · esame ' + fData(es.data) : '') + (pr ? ' · ' + pr.perc + '% consolidato' : '')}</span></span>
+        <span class="voto-b ${m.stato === 'superato' ? 'si' : m.stato === 'studio' ? 'in' : ''}">${m.stato === 'superato' ? votoTxt(m) : m.id === S.focus && m.stato === 'studio' ? I('read') : ''}</span></button>`;
+    }).join('') + `</div>`;
   }
+  if (S.tesi) h += `<div class="sec-t"><h2>Prova finale</h2></div><div class="card libro"><button class="riga" data-act="tab" data-v="tesi"><span class="dotc" style="background:var(--accent)"></span><span class="g"><b>Tesi${S.tesi.titolo ? ': ' + esc(S.tesi.titolo) : ''}</b><span>${S.tesi.cfu ? S.tesi.cfu + ' CFU · ' : ''}${esc(TESI_STATI[S.tesi.stato] || '')}</span></span><span class="voto-b ${S.tesi.stato === 'discussa' ? 'si' : ''}">${S.tesi.stato === 'discussa' && S.tesi.votoLaurea ? esc(S.tesi.votoLaurea) : ''}</span></button></div>`;
   return h;
+}
+function formPiano() {
+  const sh = sheet('Piano di studi', `<p class="sub">Una materia per riga: <strong>nome; CFU; anno</strong>. Anno e CFU sono facoltativi. Puoi copiare la tabella dall'area studenti: le colonne separate da tabulazione vanno bene.</p>
+    <div class="field"><textarea class="inp" id="p-testo" style="min-height:180px" placeholder="Anatomia umana; 9; 1&#10;Fisiologia; 9; 1&#10;Teoria e metodologia dell'allenamento; 12; 2"></textarea></div>
+    <div class="btns"><button class="btn pri block" id="p-ok">Aggiungi al libretto</button></div>
+    <p class="small muted" style="margin-top:10px">Le materie che hai già non vengono duplicate (aggiorno solo CFU e anno se mancano). Poi apri ogni esame già passato e inserisci il voto.</p>`);
+  sh.querySelector('#p-ok').onclick = () => {
+    let n = 0, agg = 0;
+    sh.querySelector('#p-testo').value.split('\n').forEach(r => {
+      const c = r.split(/\t|;|\s[-–|]\s/).map(x => x.trim()).filter(Boolean);
+      if (!c.length || c[0].length < 2) return;
+      const nome = c[0].replace(/^\d+[.)]\s*/, '');
+      const num = c.slice(1).map(x => parseInt(x, 10)).filter(x => !isNaN(x));
+      // ordine: CFU poi anno (se c'è un numero solo è il CFU)
+      const cfu = num[0] > 0 && num[0] <= 60 ? num[0] : '';
+      const anno = num[1] >= 1 && num[1] <= 6 ? num[1] : '';
+      const ex = S.materie.find(m => norm(m.nome) === norm(nome));
+      if (ex) { if (!ex.cfu && cfu) ex.cfu = cfu; if (!ex.anno && anno) ex.anno = String(anno); agg++; return; }
+      const focus = S.focus;
+      nuovaMateria(nome, { cfu, anno: anno ? String(anno) : '', stato: 'pausa' });
+      S.focus = focus; n++;
+    });
+    if (!n && !agg) { toast('Non ho trovato materie nel testo'); return; }
+    save(); chiudiSheet(); ui.filtro = 'tutti'; render(); toast(`${n} materi${n === 1 ? 'a aggiunta' : 'e aggiunte'}${agg ? ', ' + agg + ' già presenti' : ''}`);
+  };
 }
 function vMateria() {
   const m = mat(ui.apertaMateria);
-  if (!m) { ui.apertaMateria = ''; return vMaterie(); }
+  if (!m) { ui.apertaMateria = ''; return vLibretto(); }
   const lez = lezDi(m.id), cro = croDi(m.id), ape = apeDi(m.id), es = esameDi(m.id);
   const sims = S.sim.filter(s => s.mid === m.id).slice(-5).reverse();
   const daRip = cro.filter(c => vista(c.id) && srs(c.id).due <= oggi()).length;
-  let h = `<button class="btn ghost" data-act="materie-indietro" style="margin-left:-10px">${I('back')}Materie</button>
+  let h = `<button class="btn ghost" data-act="materie-indietro" style="margin-left:-10px">${I('back')}Libretto</button>
     <div class="row"><span class="dotc" style="background:${m.colore};width:16px;height:16px"></span><h1 class="g" style="font-size:25px">${esc(m.nome)}</h1><button class="x" data-act="materia-modifica" data-id="${m.id}" aria-label="Modifica">${I('edit')}</button></div>
-    <p class="muted" style="margin:4px 0 0">${m.cfu ? m.cfu + ' CFU · ' : ''}${m.stato === 'superato' ? 'Superato' + (m.voto ? ' con ' + m.voto + '/30' : '') : es ? 'Esame ' + fData(es.data, true) : 'Data d\'esame da inserire'}</p>`;
+    <p class="muted" style="margin:4px 0 0">${m.cfu ? m.cfu + ' CFU · ' : ''}${m.anno ? m.anno + '° anno · ' : ''}${m.stato === 'superato' ? (m.valutazione === 'idoneita' ? 'Idoneità ottenuta' : 'Superato' + (m.voto ? ' con ' + votoTxt(m) : '')) + (m.dataSup ? ' il ' + fData(m.dataSup) : '') : m.stato === 'pausa' ? 'Da sostenere · <button class="btn ghost sm" data-act="inizia" data-id="' + m.id + '">Inizia a prepararlo</button>' : es ? 'Esame ' + fData(es.data, true) : 'Data d\'esame da inserire'}</p>`;
   if (m.stato === 'studio') h += `<div class="btns"><button class="btn pri" data-act="quiz" data-id="${m.id}" ${cro.length ? '' : 'disabled'}>${I('quiz')}Crocette${daRip ? ' (' + daRip + ')' : ''}</button><button class="btn" data-act="aperte" data-id="${m.id}" ${ape.length ? '' : 'disabled'}>${I('mic')}Aperte</button><button class="btn" data-act="sim" data-id="${m.id}" ${cro.length >= 5 ? '' : 'disabled'}>${I('timer')}Simulazione</button></div>`;
   h += `<div class="card"><div class="stats"><div class="stat"><b>${cro.length}</b><span>crocette</span></div><div class="stat"><b>${cro.filter(c => padroneggiata(c.id)).length}</b><span>consolidate</span></div><div class="stat"><b>${ape.length}</b><span>aperte</span></div></div></div>`;
-  h += `<div class="sec-t"><h2>Lezioni</h2><button class="lnk" data-act="importa">+ Importa</button></div>`;
-  h += lez.length ? `<div class="card" style="padding:4px 14px">${lez.map(l => `<button class="item" data-act="leggi" data-id="${l.id}"><span class="ic" style="${l.letta ? 'background:var(--ok-soft);color:var(--ok)' : ''}">${I(l.letta ? 'check' : 'read')}</span><span class="g"><b>${l.n ? l.n + '. ' : ''}${esc(l.titolo)}</b><span>${S.crocette.filter(c => c.lid === l.id).length} crocette · ${S.aperte.filter(a => a.lid === l.id).length} aperte${l.letta ? ' · letta' : ''}</span></span>${I('next')}</button>`).join('')}</div>`
+  h += `<div class="sec-t"><h2>Lezioni</h2><span><button class="lnk" data-act="appunti-nuovi">+ Appunti</button> <button class="lnk" data-act="importa">+ Importa</button></span></div>`;
+  h += lez.length ? `<div class="card" style="padding:4px 14px">${lez.map(l => `<button class="item" data-act="leggi" data-id="${l.id}"><span class="ic" style="${l.letta ? 'background:var(--ok-soft);color:var(--ok)' : ''}">${I(l.letta ? 'check' : l.fonte === 'mio' ? 'pen' : 'read')}</span><span class="g"><b>${l.n ? l.n + '. ' : ''}${esc(l.titolo)}</b><span>${S.crocette.filter(c => c.lid === l.id).length} crocette · ${S.aperte.filter(a => a.lid === l.id).length} aperte${l.letta ? ' · letta' : ''}</span></span>${I('next')}</button>`).join('')}</div>`
     : `<div class="card empty"><p>Nessuna lezione. Carica le slide in Claude (progetto "SF · ${esc(m.nome)}") e importa qui il pacchetto.</p><button class="btn ghost" data-act="istruzioni">Come si fa</button></div>`;
   if (sims.length) h += `<div class="sec-t"><h2>Simulazioni</h2></div><div class="card" style="padding:4px 14px">${sims.map(s => `<div class="item"><span class="ic" style="background:${s.voto >= 18 ? 'var(--ok-soft)' : 'var(--bad-soft)'};color:${s.voto >= 18 ? 'var(--ok)' : 'var(--bad)'}"><b style="font-size:15px">${s.voto}</b></span><span class="g"><b>${s.ok}/${s.tot} giuste</b><span>${fData(s.data, true)}${s.min ? ' · ' + s.min + ' min' : ''}</span></span></div>`).join('')}</div>`;
   if (m.stato !== 'superato') h += `<div class="btns"><button class="btn ok" data-act="superato" data-id="${m.id}">${I('cap')}Esame superato!</button></div>`;
@@ -534,7 +694,7 @@ function vScadenze() {
 }
 function vScad(s) {
   const t = TIPI_S[s.tipo] || TIPI_S.altro, m = mat(s.mid);
-  const spuntabile = s.tipo === 'retta' || s.tipo === 'appello' || s.tipo === 'altro';
+  const spuntabile = s.tipo === 'retta' || s.tipo === 'appello' || s.tipo === 'tesi' || s.tipo === 'altro';
   return `<div class="item ${s.fatto ? 'fatto' : ''}">${spuntabile ? `<button class="check ${s.fatto ? 'on' : ''}" data-act="scad-fatto" data-id="${s.id}" aria-label="Fatto">${s.fatto ? I('check') : ''}</button>` : `<span class="ic" style="width:28px;height:28px;border-radius:9px;color:${t.colore}">${I(t.icon)}</span>`}
     <button class="g" data-act="scad-apri" data-id="${s.id}" style="border:0;background:none;text-align:left;padding:0"><b>${esc(s.titolo)}</b><span>${esc(t.label)} · ${fData(s.data, true)}${s.ora ? ' · ' + s.ora : ''}${m ? ' · ' + esc(m.nome) : ''}${!s.fatto && s.data >= oggi() ? ' · ' + quandoTra(s.data) : ''}</span></button></div>`;
 }
@@ -545,21 +705,115 @@ function vMail(p) {
     <div class="btns" style="margin-top:10px"><button class="btn sm pri" data-act="mail-aggiungi" data-id="${esc(p.id)}">${I('plus')}${pr.data ? 'Controlla e aggiungi' : 'Aggiungi a mano'}</button><button class="btn sm" data-act="mail-leggi" data-id="${esc(p.id)}">${I('eye')}Leggi</button><button class="btn sm" data-act="mail-ignora" data-id="${esc(p.id)}">Ignora</button></div></div>`;
 }
 
+/* ----- Tesi ----- */
+const TESI_STATI = { idea: 'Scelta dell\'argomento', assegnata: 'Assegnata dal relatore', scrittura: 'In scrittura', revisione: 'In revisione', consegnata: 'Consegnata', discussa: 'Discussa' };
+const CAP_STATI = ['Da fare', 'Bozza', 'Scritto', 'Rivisto'];
+const FASI_TESI = ['Scegliere l\'argomento e il relatore', 'Chiedere la tesi al relatore', 'Domanda di assegnazione tesi in segreteria', 'Indice approvato dal relatore', 'Raccogliere fonti e bibliografia', 'Scrivere tutti i capitoli', 'Revisione finale del relatore', 'Domanda di laurea', 'Consegna / deposito della tesi', 'Preparare la presentazione'];
+function nuovaTesi() {
+  return { titolo: '', argomento: '', relatore: '', correlatore: '', tipo: 'compilativa', cfu: '', stato: 'idea', sessione: '', votoLaurea: '', note: '', pagineObiettivo: '', fasi: FASI_TESI.map(t => ({ id: uid(), t, f: false })), capitoli: [] };
+}
+function vTesi() {
+  const T = S.tesi;
+  if (!T) return `<div class="hello"><h1>Tesi</h1><p>La prova finale, un passo alla volta.</p></div>
+    <div class="card empty"><h3>Non hai ancora iniziato la tesi</h3><p>Quando sei pronto imposti argomento e relatore: trovi già la lista delle cose da fare, i capitoli e le scadenze (domanda di laurea, consegna) che vanno anche in AgendApp.</p>
+    <div class="btns"><button class="btn pri" data-act="tesi-inizia">${I('pen')}Inizia la tesi</button></div></div>`;
+  const fFatte = T.fasi.filter(f => f.f).length, capOk = T.capitoli.filter(c => c.st >= 2).length;
+  const perc = Math.round(((fFatte / Math.max(1, T.fasi.length)) * 0.5 + (T.capitoli.length ? T.capitoli.reduce((a, c) => a + c.st / 3, 0) / T.capitoli.length : 0) * 0.5) * 100);
+  const scad = S.scad.filter(x => x.tipo === 'tesi').sort((a, b) => a.data.localeCompare(b.data));
+  return `<div class="hello"><h1>Tesi</h1><p>${esc(TESI_STATI[T.stato])}${T.sessione ? ' · sessione di laurea ' + fData(T.sessione) + ' (' + quandoTra(T.sessione) + ')' : ''}</p></div>
+    <div class="card hero"><span class="chip">${T.tipo === 'sperimentale' ? 'Tesi sperimentale' : 'Tesi compilativa'}${T.cfu ? ' · ' + esc(T.cfu) + ' CFU' : ''}</span>
+      <h2 style="margin-top:8px">${esc(T.titolo || 'Titolo da definire')}</h2><p class="sub">${T.relatore ? 'Relatore: ' + esc(T.relatore) : 'Relatore da scegliere'}${T.correlatore ? ' · Correlatore: ' + esc(T.correlatore) : ''}</p>
+      <div class="countdown"><div><b>${perc}%</b><span>avanzamento</span></div><div><b>${fFatte}/${T.fasi.length}</b><span>passi fatti</span></div><div><b>${capOk}/${T.capitoli.length}</b><span>capitoli scritti</span></div></div>
+      <div class="btns"><button class="btn acc sm" data-act="tesi-modifica">${I('edit')}Modifica dati</button></div></div>
+    <div class="sec-t"><h2>Capitoli</h2><button class="lnk" data-act="cap-nuovo">+ Capitolo</button></div>
+    ${T.capitoli.length ? `<div class="card libro">${T.capitoli.map((c, i) => `<div class="riga"><span class="ic cap-n">${i + 1}</span><button class="g" data-act="cap-modifica" data-id="${c.id}" style="border:0;background:none;text-align:left;padding:0"><b>${esc(c.t)}</b><span>${c.note ? esc(c.note.slice(0, 70)) : 'Tocca per note e titolo'}</span></button><button class="chip ${['', 'warn', 'brand', 'ok'][c.st]}" data-act="cap-stato" data-id="${c.id}" style="border:0">${CAP_STATI[c.st]}</button></div>`).join('')}</div>
+      <p class="small muted" style="text-align:center;margin:6px 0 0">Tocca lo stato per farlo avanzare: Da fare → Bozza → Scritto → Rivisto.</p>`
+      : `<div class="card empty"><p>Aggiungi i capitoli dell'indice, anche provvisori.</p><button class="btn ghost" data-act="tesi-claude">Fatti aiutare da Claude per l'indice</button></div>`}
+    <div class="sec-t"><h2>Cosa fare</h2><span class="muted small">${fFatte}/${T.fasi.length}</span></div>
+    <div class="card libro">${T.fasi.map(f => `<div class="riga ${f.f ? 'fatto' : ''}"><button class="check ${f.f ? 'on' : ''}" data-act="fase-tesi" data-id="${f.id}">${f.f ? I('check') : ''}</button><span class="g"><b style="${f.f ? 'text-decoration:line-through;opacity:.6' : ''}">${esc(f.t)}</b></span><button class="x" data-act="fase-tesi-del" data-id="${f.id}" aria-label="Togli" style="width:30px;height:30px;font-size:17px">×</button></div>`).join('')}
+      <div class="riga"><input class="inp" id="fase-nuova" placeholder="Aggiungi un passo…" style="flex:1"><button class="btn sm" data-act="fase-tesi-add">${I('plus')}</button></div></div>
+    <div class="sec-t"><h2>Scadenze della tesi</h2><button class="lnk" data-act="scad-tesi">+ Scadenza</button></div>
+    ${scad.length ? `<div class="card" style="padding:4px 14px">${scad.map(vScad).join('')}</div>` : `<div class="card empty"><p>Domanda di laurea, consegna, incontri con il relatore: aggiungili e ti arrivano anche in AgendApp.</p></div>`}
+    <div class="sec-t"><h2>Appunti</h2></div>
+    <div class="card"><textarea class="inp" id="tesi-note" style="min-height:140px" placeholder="Idee, fonti, cose da chiedere al relatore…">${esc(T.note)}</textarea></div>
+    <div class="btns"><button class="btn" data-act="tesi-claude">${I('copy')}Copia per Claude: aiuto sulla tesi</button></div>`;
+}
+function formTesi() {
+  const T = S.tesi;
+  const sh = sheet('Dati della tesi', `
+    <div class="field"><label>Titolo (anche provvisorio)</label><input class="inp" id="t-titolo" value="${esc(T.titolo)}"></div>
+    <div class="field"><label>Argomento</label><textarea class="inp" id="t-arg" style="min-height:70px">${esc(T.argomento)}</textarea></div>
+    <div class="two"><div class="field"><label>Relatore</label><input class="inp" id="t-rel" value="${esc(T.relatore)}"></div><div class="field"><label>Correlatore</label><input class="inp" id="t-corr" value="${esc(T.correlatore)}"></div></div>
+    <div class="field"><label>Tipo</label><div class="seg" id="t-tipo"><button type="button" data-v="compilativa" class="${T.tipo !== 'sperimentale' ? 'on' : ''}">Compilativa</button><button type="button" data-v="sperimentale" class="${T.tipo === 'sperimentale' ? 'on' : ''}">Sperimentale</button></div></div>
+    <div class="field"><label>Stato</label><select class="inp" id="t-stato">${Object.keys(TESI_STATI).map(k => `<option value="${k}" ${T.stato === k ? 'selected' : ''}>${TESI_STATI[k]}</option>`).join('')}</select></div>
+    <div class="two"><div class="field"><label>CFU prova finale</label><input class="inp" id="t-cfu" type="number" value="${esc(T.cfu)}"></div><div class="field"><label>Sessione di laurea</label><input class="inp" id="t-sess" type="date" value="${esc(T.sessione)}"></div></div>
+    <div class="field" id="t-voto-f" ${T.stato === 'discussa' ? '' : 'hidden'}><label>Voto di laurea</label><input class="inp" id="t-voto" value="${esc(T.votoLaurea)}" placeholder="Es. 104/110"></div>
+    <div class="btns"><button class="btn pri block" id="t-ok">Salva</button></div>
+    <div class="btns"><button class="btn bad block" id="t-del">${I('trash')}Cancella la tesi</button></div>`);
+  let tipo = T.tipo;
+  sh.querySelector('#t-tipo').addEventListener('click', e => { const b = e.target.closest('button'); if (!b) return; tipo = b.dataset.v; sh.querySelectorAll('#t-tipo button').forEach(x => x.classList.toggle('on', x === b)); });
+  sh.querySelector('#t-stato').onchange = e => { sh.querySelector('#t-voto-f').hidden = e.target.value !== 'discussa'; };
+  sh.querySelector('#t-ok').onclick = () => {
+    Object.assign(T, { titolo: sh.querySelector('#t-titolo').value.trim(), argomento: sh.querySelector('#t-arg').value.trim(), relatore: sh.querySelector('#t-rel').value.trim(), correlatore: sh.querySelector('#t-corr').value.trim(),
+      tipo, stato: sh.querySelector('#t-stato').value, cfu: sh.querySelector('#t-cfu').value, sessione: sh.querySelector('#t-sess').value, votoLaurea: sh.querySelector('#t-voto').value.trim() });
+    // la sessione di laurea va anche tra le scadenze (e quindi in AgendApp)
+    let sc = S.scad.find(x => x.tipo === 'tesi' && x.fonte === 'sessione');
+    if (T.sessione) { if (!sc) { sc = { id: uid(), tipo: 'tesi', fonte: 'sessione', mid: '', ora: '', note: '', fatto: false, fattoTs: 0 }; S.scad.push(sc); } sc.data = T.sessione; sc.titolo = 'Sessione di laurea'; }
+    else if (sc) S.scad = S.scad.filter(x => x !== sc);
+    save(); chiudiSheet(); render(); toast('Tesi salvata');
+  };
+  sh.querySelector('#t-del').onclick = () => { if (!confirm('Cancello tutti i dati della tesi?')) return; S.tesi = null; S.scad = S.scad.filter(x => x.tipo !== 'tesi'); save(); chiudiSheet(); render(); };
+}
+function formCapitolo(c) {
+  const T = S.tesi, nuovo = !c;
+  c = c || { id: uid(), t: '', st: 0, note: '' };
+  const sh = sheet(nuovo ? 'Nuovo capitolo' : 'Capitolo', `<div class="field"><label>Titolo</label><input class="inp" id="c-t" value="${esc(c.t)}" placeholder="Es. 1. Fisiologia del recupero"></div>
+    <div class="field"><label>Stato</label><div class="seg" id="c-st">${CAP_STATI.map((l, i) => `<button type="button" data-v="${i}" class="${c.st === i ? 'on' : ''}">${l}</button>`).join('')}</div></div>
+    <div class="field"><label>Note</label><textarea class="inp" id="c-note" placeholder="Fonti, punti da trattare, osservazioni del relatore…">${esc(c.note)}</textarea></div>
+    <div class="btns"><button class="btn pri block" id="c-ok">Salva</button></div>${nuovo ? '' : `<div class="btns"><button class="btn" id="c-su">Sposta su</button><button class="btn bad" id="c-del">${I('trash')}Elimina</button></div>`}`);
+  let st = c.st;
+  sh.querySelector('#c-st').addEventListener('click', e => { const b = e.target.closest('button'); if (!b) return; st = +b.dataset.v; sh.querySelectorAll('#c-st button').forEach(x => x.classList.toggle('on', x === b)); });
+  sh.querySelector('#c-ok').onclick = () => { const t = sh.querySelector('#c-t').value.trim(); if (!t) { toast('Scrivi il titolo'); return; } Object.assign(c, { t, st, note: sh.querySelector('#c-note').value }); if (nuovo) T.capitoli.push(c); save(); chiudiSheet(); render(); };
+  const d = sh.querySelector('#c-del'); if (d) d.onclick = () => { T.capitoli = T.capitoli.filter(x => x !== c); save(); chiudiSheet(); render(); };
+  const su = sh.querySelector('#c-su'); if (su) su.onclick = () => { const i = T.capitoli.indexOf(c); if (i > 0) { T.capitoli.splice(i, 1); T.capitoli.splice(i - 1, 0, c); save(); } chiudiSheet(); render(); };
+}
+function promptTesi() {
+  const T = S.tesi;
+  return `Sto preparando la tesi di laurea triennale in Scienze Motorie (L-22).
+Titolo provvisorio: ${T.titolo || 'da definire'}
+Argomento: ${T.argomento || 'da definire'}
+Tipo: ${T.tipo}
+Relatore: ${T.relatore || 'da scegliere'}
+Capitoli attuali: ${T.capitoli.length ? T.capitoli.map((c, i) => (i + 1) + '. ' + c.t + ' (' + CAP_STATI[c.st] + ')').join('; ') : 'nessuno'}
+Miei appunti: ${T.note || '-'}
+
+Aiutami in modo pratico e veloce: proponi un indice di 4-6 capitoli con 2-3 paragrafi ciascuno, le fonti scientifiche da cercare (parole chiave per PubMed/Google Scholar) e i prossimi 3 passi concreti. Scrivi in italiano.`;
+}
+
 /* ----- Impostazioni ----- */
 function vAltro() {
   const e = S.imp.email, ponte = window.Ponte && Ponte.attivo() && Ponte.collegata('agendapp');
   return `<div class="hello"><h1>Impostazioni</h1></div>
   <div class="card"><h3>Studio</h3>
     <div class="field"><label>Come ti chiami</label><input class="inp" data-imp="nome" value="${esc(S.imp.nome)}" placeholder="Il tuo nome"></div>
-    <div class="two"><div class="field"><label>Minuti al giorno</label><select class="inp" data-imp="minuti">${[15, 20, 30, 45, 60].map(n => `<option ${+S.imp.minuti === n ? 'selected' : ''}>${n}</option>`).join('')}</select></div>
-    <div class="field"><label>Ora della seduta</label><input class="inp" type="time" data-imp="oraStudio" value="${esc(S.imp.oraStudio)}"></div></div>
+    <div class="field"><label>Giorni di studio</label><div class="seg giorni" id="set-giorni">${[1, 2, 3, 4, 5, 6, 0].map(g => `<button type="button" data-act="giorno" data-v="${g}" class="${(S.imp.giorni || []).includes(g) ? 'on' : ''}">${['D', 'L', 'M', 'M', 'G', 'V', 'S'][g]}</button>`).join('')}</div>
+      <p class="small muted" style="margin:6px 0 0">${(S.imp.giorni || []).length} giorn${(S.imp.giorni || []).length === 1 ? 'o' : 'i'} a settimana · ${(S.imp.giorni || []).length * (+S.imp.sedute || 1) * S.imp.minuti} minuti alla settimana. Nei giorni liberi la serie non si interrompe.</p></div>
+    <div class="two"><div class="field"><label>Sedute al giorno</label><select class="inp" data-imp="sedute">${[1, 2, 3].map(n => `<option value="${n}" ${+S.imp.sedute === n ? 'selected' : ''}>${n}</option>`).join('')}</select></div>
+    <div class="field"><label>Minuti per seduta</label><select class="inp" data-imp="minuti">${[15, 20, 25, 30, 45, 60].map(n => `<option ${+S.imp.minuti === n ? 'selected' : ''}>${n}</option>`).join('')}</select></div></div>
+    <div class="${+S.imp.sedute > 1 ? 'three' : 'two'}">${Array.from({ length: Math.max(1, +S.imp.sedute || 1) }, (_, i) => `<div class="field"><label>${+S.imp.sedute > 1 ? 'Ora seduta ' + (i + 1) : 'Ora della seduta'}</label><input class="inp" type="time" data-ora="${i}" value="${esc(orarioSeduta(i))}"></div>`).join('')}</div>
     <div class="two"><div class="field"><label>CFU del corso</label><input class="inp" type="number" data-imp="totCfu" value="${esc(S.imp.totCfu)}"></div>
     <div class="field"><label>Avvisi scadenze</label><select class="inp" data-imp="avvisoGiorni">${[1, 2, 3, 5, 7].map(n => `<option value="${n}" ${+S.imp.avvisoGiorni === n ? 'selected' : ''}>${n} giorn${n === 1 ? 'o' : 'i'} prima</option>`).join('')}</select></div></div>
   </div>
+  <div class="card"><h3>Voce</h3>${voce.supporto() ? `
+    <div class="field"><label>Voce di lettura</label><select class="inp" id="set-voce">${opzioniVoci()}</select></div>
+    <div class="two"><div class="field"><label>Velocità</label><select class="inp" id="set-vel">${[0.8, 0.9, 1, 1.1, 1.2, 1.5, 1.8].map(v => `<option value="${v}" ${+S.imp.voceVel === v ? 'selected' : ''}>${v}×</option>`).join('')}</select></div>
+    <div class="field"><label>&nbsp;</label><button class="btn block" data-act="voce-prova">${I('speaker')}Prova</button></div></div>
+    <p class="small muted" style="margin:8px 0 0">Le voci sono quelle installate sul telefono. Per averne altre: Impostazioni di Android → Sintesi vocale (o "Text-to-speech") → installa i dati vocali italiani.</p>`
+    : '<p class="sub">Questo browser non ha la lettura ad alta voce.</p>'}</div>
   <div class="card"><h3>Avvisi</h3>
     <div class="set"><div class="g">Notifiche sul telefono<small>Scadenze in arrivo e promemoria della seduta, quando l'app è aperta o in background</small></div><label class="sw"><input type="checkbox" data-act="notifiche" ${S.imp.notifiche ? 'checked' : ''}><span></span></label></div>
     <div class="set"><div class="g">Collegata ad AgendApp<small>${ponte ? 'Attiva: rette, appelli, esami e lezioni arrivano in agenda con gli avvisi a schermo intero' : 'Le scadenze arrivano in AgendApp e ti avvisa anche ad app chiusa'}</small></div><button class="btn sm ${ponte ? '' : 'pri'}" data-act="ponte">${ponte ? 'Gestisci' : 'Collega'}</button></div>
-    <div class="set"><div class="g">Seduta di studio in AgendApp<small>Mette in agenda i ${S.imp.minuti} minuti di ogni giorno alle ${esc(S.imp.oraStudio)}, così AgendApp te li ricorda</small></div><label class="sw"><input type="checkbox" data-imp-b="studioInAgenda" ${S.imp.studioInAgenda ? 'checked' : ''}><span></span></label></div>
+    <div class="set"><div class="g">Seduta di studio in AgendApp<small>Mette in agenda ${+S.imp.sedute > 1 ? 'le ' + S.imp.sedute + ' sedute' : 'la seduta'} di ogni giorno di studio, così AgendApp te le ricorda</small></div><label class="sw"><input type="checkbox" data-imp-b="studioInAgenda" ${S.imp.studioInAgenda ? 'checked' : ''}><span></span></label></div>
   </div>
   <div class="card"><h3>Email dell'università</h3><p class="sub">${e.url ? (e.ultimo ? 'Ultimo controllo ' + new Date(e.ultimo).toLocaleString('it-IT', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : 'Script collegato') + ' · ' + e.mittenti.length + ' mittent' + (e.mittenti.length === 1 ? 'e' : 'i') : 'Non ancora collegata'}</p>
     <div class="btns"><button class="btn ${e.url ? '' : 'pri'}" data-act="email-setup">${I('mail')}${e.url ? 'Mittenti e collegamento' : 'Collega le email'}</button></div></div>
@@ -583,31 +837,58 @@ function sheet(titolo, corpo, onClose) {
 }
 function chiudiSheet() { const b = $('#sheets .sheet-bg'); if (b) { if (b._onClose) b._onClose(); b.remove(); } }
 
-function formMateria(m) {
-  const nuovo = !m; m = m || { nome: '', cfu: '', stato: 'studio', voto: '', simN: 30, simMin: 30, colore: COLORI[S.materie.length % COLORI.length] };
+function formMateria(m, comeSuperato) {
+  const nuovo = !m; m = m || { nome: '', cfu: '', anno: '', stato: 'studio', voto: '', lode: false, valutazione: 'voto', dataSup: '', simN: 30, simMin: 30, colore: COLORI[S.materie.length % COLORI.length] };
   const es = m.id ? esameDi(m.id) : null;
-  const sh = sheet(nuovo ? 'Nuovo esame' : 'Modifica esame', `
+  let stato = comeSuperato ? 'superato' : m.stato, val = m.valutazione || 'voto';
+  const sh = sheet(nuovo ? 'Nuova materia' : comeSuperato ? 'Esame superato!' : 'Modifica materia', `
     <div class="field"><label>Nome della materia</label><input class="inp" id="m-nome" value="${esc(m.nome)}" placeholder="Es. Anatomia umana" autocomplete="off"></div>
-    <div class="two"><div class="field"><label>CFU</label><input class="inp" id="m-cfu" type="number" value="${esc(m.cfu)}" placeholder="Es. 9"></div>
-    <div class="field"><label>Data dell'esame</label><input class="inp" id="m-data" type="date" value="${es ? es.data : ''}"></div></div>
-    <p class="small muted" style="margin:6px 0 0">Se non hai ancora prenotato lascia vuoto: il piano dura 4 settimane e la aggiungi quando prenoti.</p>
-    <div class="field"><label>Stato</label><div class="seg" id="m-stato">${[['studio', 'In preparazione'], ['pausa', 'Più avanti'], ['superato', 'Superato']].map(([v, l]) => `<button type="button" data-v="${v}" class="${m.stato === v ? 'on' : ''}">${l}</button>`).join('')}</div></div>
-    <div class="field" id="m-voto-f" ${m.stato === 'superato' ? '' : 'hidden'}><label>Voto</label><input class="inp" id="m-voto" type="number" min="18" max="31" value="${esc(m.voto)}" placeholder="Es. 24 (31 = 30 e lode)"></div>
-    <div class="two"><div class="field"><label>Crocette nella simulazione</label><input class="inp" id="m-simn" type="number" min="5" value="${esc(m.simN)}"></div>
-    <div class="field"><label>Minuti simulazione</label><input class="inp" id="m-simmin" type="number" min="5" value="${esc(m.simMin)}"></div></div>
+    <div class="two"><div class="field"><label>CFU</label><input class="inp" id="m-cfu" type="number" min="0" value="${esc(m.cfu)}" placeholder="Es. 9"></div>
+    <div class="field"><label>Anno di corso</label><select class="inp" id="m-anno"><option value="">—</option>${[1, 2, 3, 4, 5].map(n => `<option value="${n}" ${String(m.anno) === String(n) ? 'selected' : ''}>${n}° anno</option>`).join('')}</select></div></div>
+    <div class="field"><label>Stato</label><div class="seg" id="m-stato">${Object.keys(STATI).map(v => `<button type="button" data-v="${v}" class="${stato === v ? 'on' : ''}">${STATI[v]}</button>`).join('')}</div></div>
+    <div class="field"><label>Valutazione</label><div class="seg" id="m-val"><button type="button" data-v="voto" class="${val === 'voto' ? 'on' : ''}">Voto in trentesimi</button><button type="button" data-v="idoneita" class="${val === 'idoneita' ? 'on' : ''}">Idoneità</button></div></div>
+    <div id="m-sup" ${stato === 'superato' ? '' : 'hidden'}>
+      <div class="two"><div class="field" id="m-voto-f" ${val === 'voto' ? '' : 'hidden'}><label>Voto</label><input class="inp" id="m-voto" type="number" min="18" max="30" value="${esc(Math.min(30, +m.voto || 0) || '')}" placeholder="18-30"></div>
+      <div class="field"><label>Data superamento</label><input class="inp" id="m-dsup" type="date" value="${esc(m.dataSup || (comeSuperato ? oggi() : ''))}"></div></div>
+      <label class="set" id="m-lode-f" style="border:0;padding:8px 0 0" ${val === 'voto' ? '' : 'hidden'}><span class="g">Con lode</span><span class="sw"><input type="checkbox" id="m-lode" ${m.lode ? 'checked' : ''}><span></span></span></label>
+    </div>
+    <div id="m-studio" ${stato === 'superato' ? 'hidden' : ''}>
+      <div class="field"><label>Data dell'esame</label><input class="inp" id="m-data" type="date" value="${es ? es.data : ''}"></div>
+      <p class="small muted" style="margin:6px 0 0">Se non hai ancora prenotato lascia vuoto: il piano dura 4 settimane e la aggiungi quando prenoti.</p>
+      <div class="two"><div class="field"><label>Crocette in simulazione</label><input class="inp" id="m-simn" type="number" min="5" value="${esc(m.simN || 30)}"></div>
+      <div class="field"><label>Minuti simulazione</label><input class="inp" id="m-simmin" type="number" min="5" value="${esc(m.simMin || 30)}"></div></div>
+    </div>
     <div class="btns"><button class="btn pri block" id="m-salva">Salva</button></div>
     ${nuovo ? '' : `<div class="btns"><button class="btn bad block" id="m-elimina">${I('trash')}Elimina materia e contenuti</button></div>`}`);
-  let stato = m.stato;
-  sh.querySelector('#m-stato').addEventListener('click', e => { const b = e.target.closest('button'); if (!b) return; stato = b.dataset.v; sh.querySelectorAll('#m-stato button').forEach(x => x.classList.toggle('on', x === b)); sh.querySelector('#m-voto-f').hidden = stato !== 'superato'; });
+  const agg = () => {
+    sh.querySelectorAll('#m-stato button').forEach(x => x.classList.toggle('on', x.dataset.v === stato));
+    sh.querySelectorAll('#m-val button').forEach(x => x.classList.toggle('on', x.dataset.v === val));
+    sh.querySelector('#m-sup').hidden = stato !== 'superato'; sh.querySelector('#m-studio').hidden = stato === 'superato';
+    sh.querySelector('#m-voto-f').hidden = val !== 'voto'; sh.querySelector('#m-lode-f').hidden = val !== 'voto';
+  };
+  sh.querySelector('#m-stato').addEventListener('click', e => { const b = e.target.closest('button'); if (b) { stato = b.dataset.v; agg(); } });
+  sh.querySelector('#m-val').addEventListener('click', e => { const b = e.target.closest('button'); if (b) { val = b.dataset.v; agg(); } });
   sh.querySelector('#m-salva').onclick = () => {
     const nome = sh.querySelector('#m-nome').value.trim();
     if (!nome) { toast('Scrivi il nome della materia'); return; }
+    const voto = +sh.querySelector('#m-voto').value;
+    if (stato === 'superato' && val === 'voto' && voto && (voto < 18 || voto > 30)) { toast('Il voto va da 18 a 30'); return; }
+    const focusPrima = S.focus;
     if (nuovo) m = nuovaMateria(nome); else m.nome = nome;
-    m.cfu = sh.querySelector('#m-cfu').value; m.stato = stato; m.voto = stato === 'superato' ? sh.querySelector('#m-voto').value : '';
-    m.simN = Math.max(5, +sh.querySelector('#m-simn').value || 30); m.simMin = Math.max(5, +sh.querySelector('#m-simmin').value || 30);
-    impostaDataEsame(m, sh.querySelector('#m-data').value);
+    Object.assign(m, { cfu: sh.querySelector('#m-cfu').value, anno: sh.querySelector('#m-anno').value, stato, valutazione: val });
+    if (stato === 'superato') {
+      Object.assign(m, { voto: val === 'voto' ? (voto || '') : '', lode: val === 'voto' && voto === 30 && sh.querySelector('#m-lode').checked, dataSup: sh.querySelector('#m-dsup').value || oggi() });
+      S.scad.filter(x => x.mid === m.id && x.tipo === 'esame' && !x.fatto).forEach(x => { x.fatto = true; x.fattoTs = Date.now(); });
+      if (S.focus === m.id) { S.focus = ''; materiaAttiva(); }
+    } else {
+      m.voto = ''; m.lode = false; m.dataSup = '';
+      m.simN = Math.max(5, +sh.querySelector('#m-simn').value || 30); m.simMin = Math.max(5, +sh.querySelector('#m-simmin').value || 30);
+      impostaDataEsame(m, sh.querySelector('#m-data').value);
+    }
+    if (nuovo && stato !== 'studio') S.focus = focusPrima;
     if (stato === 'studio' && nuovo) S.focus = m.id;
-    save(); chiudiSheet(); render(); toast(nuovo ? 'Esame aggiunto' : 'Salvato');
+    save(); chiudiSheet(); render();
+    toast(comeSuperato || (stato === 'superato' && m.voto) ? '🎉 ' + nome + ': ' + votoTxt(m) + '. Un esame in meno!' : nuovo ? 'Materia aggiunta' : 'Salvato', 4000);
   };
   const el = sh.querySelector('#m-elimina');
   if (el) el.onclick = () => {
@@ -660,31 +941,192 @@ function formScadenza(s, preset) {
   const f = sh.querySelector('#s-fatto'); if (f) f.onclick = () => { s.fatto = !s.fatto; s.fattoTs = Date.now(); save(); chiudiSheet(); render(); };
   const el = sh.querySelector('#s-elimina'); if (el) el.onclick = () => { if (!confirm('Elimino questa scadenza?')) return; S.scad = S.scad.filter(x => x !== s); save(); chiudiSheet(); render(); };
 }
-function formImporta() {
-  const sh = sheet('Importa pacchetto', `<p class="sub">Copia tutta la risposta di Claude con il pacchetto (anche con il testo intorno) e incollala qui, oppure scegli il file .json.</p>
-    <div class="field"><textarea class="inp" id="i-testo" placeholder='{ "studiofacile": 1, "materia": "…", "lezioni": [ … ] }'></textarea></div>
-    <div class="btns"><button class="btn" id="i-incolla">Incolla dagli appunti</button><button class="btn" id="i-file">${I('upload')}Scegli file</button></div>
-    <div class="btns"><button class="btn pri block" id="i-ok">Importa</button></div>
-    <p class="small muted" style="margin-top:12px">Se importi di nuovo la stessa lezione, la versione nuova sostituisce la vecchia e il ripasso già fatto resta.</p>`);
-  const ta = sh.querySelector('#i-testo');
-  sh.querySelector('#i-incolla').onclick = async () => { try { ta.value = await navigator.clipboard.readText(); } catch (e) { toast('Tieni premuto nel riquadro e scegli "Incolla"'); } };
-  sh.querySelector('#i-file').onclick = () => {
-    const i = document.createElement('input'); i.type = 'file'; i.accept = '.json,application/json,text/plain'; i.multiple = true;
-    i.onchange = async () => { const t = await Promise.all([...i.files].map(f => f.text())); if (t.length === 1) ta.value = t[0]; else ta.value = '[' + t.map(x => JSON.stringify(estraiJson(x))).join(',') + ']'; };
+function formImporta(scheda) {
+  scheda = scheda || 'pacchetto';
+  const sh = sheet('Importa', `<div class="seg import-tab" id="i-tab">${[['pacchetto', 'Pacchetto Claude'], ['appunti', 'I miei appunti'], ['file', 'File e foto']].map(([v, l]) => `<button type="button" data-v="${v}" class="${scheda === v ? 'on' : ''}">${l}</button>`).join('')}</div><div id="i-corpo"></div>`);
+  const corpo = sh.querySelector('#i-corpo');
+  const mostra = t => {
+    scheda = t; sh.querySelectorAll('#i-tab button').forEach(x => x.classList.toggle('on', x.dataset.v === t));
+    if (t === 'pacchetto') {
+      corpo.innerHTML = `<p class="sub">Copia tutta la risposta di Claude con il pacchetto (anche con il testo intorno) e incollala qui.</p>
+        <div class="field"><textarea class="inp" id="i-testo" placeholder='{ "studiofacile": 1, "materia": "…", "lezioni": [ … ] }'></textarea></div>
+        <div class="btns"><button class="btn" id="i-incolla">Incolla dagli appunti</button><button class="btn pri" id="i-ok">Importa</button></div>
+        <p class="small muted" style="margin-top:12px">Se importi di nuovo la stessa lezione, la versione nuova sostituisce la vecchia e il ripasso già fatto resta.</p>`;
+      const ta = corpo.querySelector('#i-testo');
+      corpo.querySelector('#i-incolla').onclick = async () => { try { ta.value = await navigator.clipboard.readText(); } catch (e) { toast('Tieni premuto nel riquadro e scegli "Incolla"'); } };
+      corpo.querySelector('#i-ok').onclick = () => importaTesto(ta.value);
+    } else if (t === 'appunti') {
+      chiudiSheet(); formAppunti(null, {});
+    } else {
+      corpo.innerHTML = `<p class="sub">Scegli uno o più file. Il testo diventa una lezione che puoi leggere, ascoltare e completare con le crocette di Claude.</p>
+        <div class="tipi-file">
+          <div>${I('file')}<b>PDF</b><span>slide e dispense</span></div><div>${I('file')}<b>Word</b><span>.docx</span></div>
+          <div>${I('file')}<b>Testo</b><span>.txt, .md</span></div><div>${I('image')}<b>Foto</b><span>appunti, lavagna, libro</span></div>
+          <div>${I('upload')}<b>Pacchetto</b><span>.json di Claude</span></div></div>
+        <div class="btns"><button class="btn pri block" id="i-scegli">${I('upload')}Scegli i file</button></div>
+        <div class="btns"><button class="btn block" id="i-foto">${I('image')}Scatta una foto</button></div>
+        <p class="small muted" id="i-stato" style="margin-top:10px">I PDF fatti soprattutto di immagini vengono salvati anche pagina per pagina, così li sfogli nell'app. Per farli analizzare e trasformare in crocette caricali in Claude.</p>`;
+      const scegli = cattura => {
+        const i = document.createElement('input'); i.type = 'file'; i.multiple = !cattura;
+        i.accept = cattura ? 'image/*' : '.pdf,.docx,.txt,.md,.markdown,.json,.csv,.rtf,image/*,application/pdf,text/plain';
+        if (cattura) i.capture = 'environment';
+        i.onchange = () => leggiFile([...i.files], corpo.querySelector('#i-stato'));
+        i.click();
+      };
+      corpo.querySelector('#i-scegli').onclick = () => scegli(false);
+      corpo.querySelector('#i-foto').onclick = () => scegli(true);
+    }
+  };
+  sh.querySelector('#i-tab').addEventListener('click', e => { const b = e.target.closest('button'); if (b) mostra(b.dataset.v); });
+  mostra(scheda);
+}
+function importaTesto(testo) {
+  try {
+    const r = importaPacchetti(estraiJson(testo));
+    chiudiSheet();
+    const mm = S.materie.find(x => x.nome === [...r.materie][0]);
+    if (mm) { ui.tab = 'libretto'; ui.apertaMateria = mm.id; }
+    render();
+    toast(`✓ ${r.lezioni} lezion${r.lezioni === 1 ? 'e' : 'i'}, ${r.crocette} crocette, ${r.aperte} aperte${r.scartate ? ' · ' + r.scartate + ' scartate perché incomplete' : ''}`, 5000);
+    return true;
+  } catch (e) { toast('Non riesco a leggerlo: ' + e.message, 5000); return false; }
+}
+async function leggiFile(files, stato) {
+  if (!files.length) return;
+  const say = t => { if (stato) stato.textContent = t; };
+  const testi = [], immagini = [];
+  let titolo = '';
+  try {
+    for (const f of files) {
+      const nome = f.name || 'file', ext = (nome.split('.').pop() || '').toLowerCase();
+      if (!titolo) titolo = nome.replace(/\.[^.]+$/, '').replace(/[_-]+/g, ' ').trim();
+      say('Leggo ' + nome + '…');
+      if (ext === 'json') {
+        const t = await f.text();
+        try { const d = estraiJson(t); if (d && (d.materia || Array.isArray(d))) { if (importaTesto(t)) return; } } catch (e) { /* non è un pacchetto: lo tratto come testo */ }
+        testi.push(t);
+      } else if (ext === 'pdf' || f.type === 'application/pdf') {
+        const { doc, pagine } = await testoDaPdf(f, (i, n) => say('PDF: pagina ' + i + ' di ' + n));
+        const caratteri = pagine.join('').length;
+        testi.push(pagine.map((t, i) => t ? '### Pagina ' + (i + 1) + '\n' + t : '').filter(Boolean).join('\n\n'));
+        if (caratteri / Math.max(1, pagine.length) < 250) {
+          say('Poche parole nel PDF: salvo le pagine come immagini…');
+          (await paginePdfComeImmagini(doc, 60, (i, n) => say('Pagine come immagini: ' + i + ' di ' + n))).forEach(x => immagini.push(x));
+        }
+      } else if (ext === 'docx') {
+        testi.push(await testoDaDocx(f));
+      } else if (/^image\//.test(f.type) || /^(jpe?g|png|webp|heic|gif)$/.test(ext)) {
+        immagini.push({ nome, dataUrl: await riduciImmagine(await leggiFileUrl(f), 1600) });
+      } else if (ext === 'rtf') {
+        testi.push((await f.text()).replace(/\\par[d]?/g, '\n').replace(/\{\*?\\[^{}]+}|[{}]|\\\S+ ?/g, '').trim());
+      } else {
+        testi.push(await f.text());
+      }
+    }
+  } catch (e) { say('Errore: ' + e.message); toast('Non riesco a leggere il file: ' + e.message, 5000); return; }
+  chiudiSheet();
+  formAppunti(null, { titolo, testo: testi.filter(Boolean).join('\n\n'), immagini });
+}
+
+/* appunti: una lezione scritta da te (o da un file), modificabile */
+function formAppunti(l, preset) {
+  const nuovo = !l;
+  const att = materiaAttiva();
+  const v = l ? { mid: l.mid, titolo: l.titolo, testo: l.riassunto, n: l.n } : Object.assign({ mid: att ? att.id : (S.materie[0] || {}).id || '', titolo: '', testo: '' }, preset || {});
+  const nuove = (preset && preset.immagini) || [], tolte = new Set();
+  const vecchie = l ? (l.allegati || []) : [];
+  const sh = sheet(nuovo ? 'I miei appunti' : 'Modifica lezione', `
+    <div class="field"><label>Materia</label><select class="inp" id="a-mid">${S.materie.map(m => `<option value="${m.id}" ${v.mid === m.id ? 'selected' : ''}>${esc(m.nome)}</option>`).join('')}<option value="__nuova" ${S.materie.length ? '' : 'selected'}>+ Nuova materia…</option></select></div>
+    <div class="field" id="a-nm-f" ${S.materie.length ? 'hidden' : ''}><label>Nome della nuova materia</label><input class="inp" id="a-nm" placeholder="Es. Anatomia umana"></div>
+    <div class="field"><label>Titolo della lezione</label><input class="inp" id="a-tit" value="${esc(v.titolo)}" placeholder="Es. Lezione 4 – Il sistema cardiovascolare"></div>
+    <div class="field"><label>Testo</label><textarea class="inp" id="a-testo" style="min-height:220px;font-size:15px" placeholder="Scrivi o incolla i tuoi appunti. Puoi usare:&#10;## Titolo&#10;- elenco puntato&#10;**parola importante**">${esc(v.testo)}</textarea></div>
+    <div class="field"><label>Immagini</label><div class="thumbs" id="a-img"></div>
+      <div class="btns" style="margin-top:8px"><button class="btn sm" type="button" id="a-add">${I('image')}Aggiungi foto</button><button class="btn sm" type="button" id="a-file">${I('file')}Aggiungi testo da file</button></div></div>
+    <div class="btns"><button class="btn pri block" id="a-ok">Salva la lezione</button></div>
+    <div class="btns"><button class="btn block" id="a-claude">${I('copy')}Salva e copia per Claude (crocette dai miei appunti)</button></div>
+    ${nuovo ? '' : `<div class="btns"><button class="btn bad block" id="a-del">${I('trash')}Elimina la lezione</button></div>`}`);
+  const sel = sh.querySelector('#a-mid');
+  sel.onchange = () => { sh.querySelector('#a-nm-f').hidden = sel.value !== '__nuova'; };
+  const disegna = async () => {
+    const box = sh.querySelector('#a-img');
+    const tutte = vecchie.filter(x => !tolte.has(x.id)).map(x => ({ k: 'v:' + x.id, nome: x.nome, src: null, id: x.id })).concat(nuove.map((x, i) => ({ k: 'n:' + i, nome: x.nome, src: x.dataUrl })));
+    box.innerHTML = tutte.length ? tutte.map(x => `<span class="thumb"><img data-k="${x.k}" alt="${esc(x.nome)}" ${x.src ? `src="${x.src}"` : ''}><button type="button" data-tog="${x.k}" aria-label="Togli">×</button></span>`).join('') : '<span class="small muted">Nessuna immagine</span>';
+    for (const x of tutte) if (!x.src) { const d = await imgGet(x.id); const im = box.querySelector(`img[data-k="${x.k}"]`); if (im && d) im.src = d; }
+  };
+  sh.querySelector('#a-img').addEventListener('click', e => {
+    const b = e.target.closest('[data-tog]'); if (!b) return;
+    const [t, k] = b.dataset.tog.split(':');
+    if (t === 'v') tolte.add(k); else nuove.splice(+k, 1);
+    disegna();
+  });
+  sh.querySelector('#a-add').onclick = () => {
+    const i = document.createElement('input'); i.type = 'file'; i.accept = 'image/*'; i.multiple = true;
+    i.onchange = async () => { for (const f of i.files) { try { nuove.push({ nome: f.name, dataUrl: await riduciImmagine(await leggiFileUrl(f), 1600) }); } catch (e) { toast(e.message); } } disegna(); };
     i.click();
   };
-  sh.querySelector('#i-ok').onclick = () => {
-    try {
-      const r = importaPacchetti(estraiJson(ta.value));
-      chiudiSheet();
-      const m = [...r.materie][0];
-      const mm = S.materie.find(x => x.nome === m);
-      if (mm) { ui.tab = 'materie'; ui.apertaMateria = mm.id; }
-      render();
-      toast(`✓ ${r.lezioni} lezion${r.lezioni === 1 ? 'e' : 'i'}, ${r.crocette} crocette, ${r.aperte} aperte${r.scartate ? ' · ' + r.scartate + ' scartate perché incomplete' : ''}`, 5000);
-    } catch (e) { toast('Non riesco a leggerlo: ' + e.message, 5000); }
+  sh.querySelector('#a-file').onclick = () => {
+    const i = document.createElement('input'); i.type = 'file'; i.accept = '.pdf,.docx,.txt,.md,application/pdf,text/plain';
+    i.onchange = async () => {
+      const f = i.files[0]; if (!f) return; const ta = sh.querySelector('#a-testo');
+      try {
+        const ext = f.name.split('.').pop().toLowerCase(); toast('Leggo ' + f.name + '…');
+        const t = ext === 'pdf' ? (await testoDaPdf(f)).pagine.map((x, k) => x ? '### Pagina ' + (k + 1) + '\n' + x : '').filter(Boolean).join('\n\n') : ext === 'docx' ? await testoDaDocx(f) : await f.text();
+        ta.value = (ta.value ? ta.value + '\n\n' : '') + t; toast('Testo aggiunto');
+      } catch (e) { toast('Non riesco a leggerlo: ' + e.message); }
+    };
+    i.click();
+  };
+  disegna();
+  const salva = async () => {
+    let mid = sel.value;
+    if (mid === '__nuova') {
+      const nm = sh.querySelector('#a-nm').value.trim(); if (!nm) { toast('Scrivi il nome della materia'); return null; }
+      const ex = S.materie.find(m => norm(m.nome) === norm(nm)); mid = (ex || nuovaMateria(nm)).id;
+    }
+    const titolo = sh.querySelector('#a-tit').value.trim(), testo = sh.querySelector('#a-testo').value;
+    if (!titolo) { toast('Dai un titolo alla lezione'); return null; }
+    if (!testo.trim() && !nuove.length && !vecchie.some(x => !tolte.has(x.id))) { toast('Scrivi qualcosa o aggiungi una foto'); return null; }
+    let lez = l;
+    if (!lez) { lez = { id: uid(), mid, n: lezDi(mid).length + 1, titolo, riassunto: testo, letta: false, aggiunta: Date.now(), fonte: 'mio', allegati: [] }; S.lezioni.push(lez); }
+    else {
+      if (lez.mid !== mid) { S.crocette.filter(c => c.lid === lez.id).forEach(c => { c.mid = mid; }); S.aperte.filter(a => a.lid === lez.id).forEach(a => { a.mid = mid; }); }
+      Object.assign(lez, { mid, titolo, riassunto: testo });
+    }
+    lez.allegati = (lez.allegati || []).filter(x => !tolte.has(x.id));
+    tolte.forEach(imgDel);
+    for (const x of nuove) { const id = uid(); if (await imgPut(id, x.dataUrl)) lez.allegati.push({ id, nome: x.nome }); }
+    save();
+    return lez;
+  };
+  sh.querySelector('#a-ok').onclick = async () => { const lez = await salva(); if (!lez) return; chiudiSheet(); ui.tab = 'libretto'; ui.apertaMateria = lez.mid; render(); toast('Lezione salvata'); };
+  sh.querySelector('#a-claude').onclick = async () => {
+    const lez = await salva(); if (!lez) return;
+    const testo = promptAppunti(lez);
+    chiudiSheet(); ui.tab = 'libretto'; ui.apertaMateria = lez.mid; render();
+    navigator.clipboard.writeText(testo).then(() => toast('Salvata e copiata: incollala in Claude, poi importa il pacchetto che ti dà', 6000),
+      () => sheet('Copia per Claude', `<pre class="code">${esc(testo)}</pre>`));
+  };
+  const d = sh.querySelector('#a-del');
+  if (d) d.onclick = () => {
+    if (!confirm('Elimino la lezione "' + l.titolo + '" con le sue crocette e domande?')) return;
+    [...S.crocette, ...S.aperte].filter(x => x.lid === l.id).forEach(x => delete S.srs[x.id]);
+    S.crocette = S.crocette.filter(x => x.lid !== l.id); S.aperte = S.aperte.filter(x => x.lid !== l.id);
+    (l.allegati || []).forEach(x => imgDel(x.id));
+    S.lezioni = S.lezioni.filter(x => x !== l); save(); chiudiSheet(); render(); toast('Lezione eliminata');
   };
 }
+function promptAppunti(l) {
+  const m = mat(l.mid);
+  return ISTRUZIONI_CLAUDE + `
+
+---
+Questa volta non ti carico slide: ecco i MIEI appunti della lezione. Preparami crocette e domande aperte basate su questi appunti${(l.allegati || []).length ? ' (ti allego anche le foto che ho nella lezione, se riesco)' : ''}.
+Nel pacchetto usa esattamente: materia "${m ? m.nome : ''}", titolo "${l.titolo}", e lascia "riassunto": "" vuoto, così restano i miei appunti.
+
+APPUNTI:
+${l.riassunto}`;
+}
+
 function formEmail() {
   const e = S.imp.email;
   const sh = sheet('Email dell\'università', `<p class="sub">Uno script sul tuo Gmail legge <strong>solo</strong> le email dei mittenti qui sotto e le passa all'app. Nessun server esterno.</p>
@@ -770,7 +1212,11 @@ const minuti = t0 => Math.max(0, (Date.now() - t0) / 60000);
 const voce = {
   pezzi: [], i: 0, attiva: false, inPausa: false,
   supporto: () => 'speechSynthesis' in window,
-  voceIt() { const v = speechSynthesis.getVoices(); return v.find(x => /it[-_]IT/i.test(x.lang) && /google|natural|neural|premium/i.test(x.name)) || v.find(x => /^it/i.test(x.lang)) || null; },
+  voceIt() {
+    const v = speechSynthesis.getVoices();
+    return (S.imp.voceNome && v.find(x => x.voiceURI === S.imp.voceNome || x.name === S.imp.voceNome)) ||
+      v.find(x => /it[-_]IT/i.test(x.lang) && /google|natural|neural|premium/i.test(x.name)) || v.find(x => /^it/i.test(x.lang)) || null;
+  },
   leggi(testo, onFine) {
     this.stop();
     this.pezzi = testo.replace(/\s+/g, ' ').match(/[^.!?;:]+[.!?;:]*/g) || [testo];
@@ -781,7 +1227,7 @@ const voce = {
     if (!this.attiva) return;
     if (this.i >= this.pezzi.length) { this.attiva = false; if (this.onFine) this.onFine(); aggVoce(); return; }
     const u = new SpeechSynthesisUtterance(this.pezzi[this.i].trim());
-    u.lang = 'it-IT'; u.rate = S.imp.voceVel || 1; const v = this.voceIt(); if (v) u.voice = v;
+    const v = this.voceIt(); u.lang = v ? v.lang : 'it-IT'; u.rate = S.imp.voceVel || 1; if (v) u.voice = v;
     u.onend = () => { this.i++; this.prossimo(); };
     u.onerror = () => { this.i++; this.prossimo(); };
     speechSynthesis.speak(u); aggVoce();
@@ -789,7 +1235,15 @@ const voce = {
   pausa() { if (!this.attiva) return; if (this.inPausa) { speechSynthesis.resume(); this.inPausa = false; } else { speechSynthesis.pause(); this.inPausa = true; } aggVoce(); },
   stop() { this.attiva = false; this.inPausa = false; if (this.supporto()) speechSynthesis.cancel(); }
 };
-if (voce.supporto()) speechSynthesis.onvoiceschanged = () => {};
+function opzioniVoci() {
+  const v = voce.supporto() ? speechSynthesis.getVoices() : [];
+  if (!v.length) return '<option value="">Voce predefinita del telefono</option>';
+  const scelta = voce.voceIt();
+  const it = v.filter(x => /^it/i.test(x.lang)), altre = v.filter(x => !/^it/i.test(x.lang));
+  const opt = x => `<option value="${esc(x.voiceURI)}" ${scelta && scelta.voiceURI === x.voiceURI ? 'selected' : ''}>${esc(x.name.replace(/^(Microsoft|Google)\s+/, ''))}${x.localService ? '' : ' (online)'}</option>`;
+  return (it.length ? `<optgroup label="Italiano">${it.map(opt).join('')}</optgroup>` : '') + (altre.length ? `<optgroup label="Altre lingue">${altre.map(opt).join('')}</optgroup>` : '');
+}
+if (voce.supporto()) speechSynthesis.onvoiceschanged = () => { const s = $('#set-voce'); if (s) s.innerHTML = opzioniVoci(); };
 function aggVoce() {
   const b = $('#voce-play'); if (!b) return;
   b.innerHTML = voce.attiva && !voce.inPausa ? I('pause') + 'Pausa' : I('play') + (voce.attiva ? 'Riprendi' : 'Ascolta');
@@ -817,10 +1271,17 @@ function apriLettura(lid, stepId) {
   const l = S.lezioni.find(x => x.id === lid); if (!l) return;
   const m = mat(l.mid);
   PL.attivo = { tipo: 'lettura', lid, stepId, t0: Date.now() };
-  apriPlayer(testa(esc(l.titolo), esc(m ? m.nome : '')) + `<div class="pl-body"><div class="read">${md(l.riassunto) || '<p class="muted">Questa lezione non ha un riassunto.</p>'}</div>
-    ${voce.supporto() && l.riassunto ? `<div class="voice"><button id="voce-play" data-act="voce">${I('play')}Ascolta</button><span class="g" id="voce-stato">Lettura ad alta voce</span><button data-act="voce-vel">${S.imp.voceVel}×</button><button data-act="voce-stop" aria-label="Ferma">${I('stop')}</button></div>` : ''}
+  const allegati = l.allegati || [];
+  apriPlayer(testa(esc(l.titolo), esc(m ? m.nome : '') + (l.fonte === 'mio' ? ' · i tuoi appunti' : ''), `<button class="x" data-act="lez-modifica" data-id="${l.id}" aria-label="Modifica">${I('edit')}</button>`) + `<div class="pl-body"><div class="read">${md(l.riassunto) || (allegati.length ? '' : '<p class="muted">Questa lezione non ha un riassunto.</p>')}</div>
+    ${allegati.length ? `<div class="sec-t"><h2>Immagini</h2><span class="muted small">${allegati.length}</span></div><div class="galleria">${allegati.map(x => `<button data-act="img-apri" data-id="${x.id}"><img data-img="${x.id}" alt="${esc(x.nome)}"></button>`).join('')}</div>` : ''}
+    ${voce.supporto() && l.riassunto ? `<div class="voice"><button id="voce-play" data-act="voce">${I('play')}Ascolta</button><span class="g" id="voce-stato">Lettura ad alta voce</span><button data-act="voce-scegli" aria-label="Scegli voce">${I('speaker')}</button><button data-act="voce-vel">${S.imp.voceVel}×</button><button data-act="voce-stop" aria-label="Ferma">${I('stop')}</button></div>` : ''}
     <div class="btns"><button class="btn ${l.letta ? '' : 'pri'} block" data-act="letta">${I('check')}${l.letta ? 'Già letta · chiudi' : 'Fatto, l\'ho letta'}</button></div>
-    ${S.crocette.some(c => c.lid === l.id) ? `<div class="btns"><button class="btn block" data-act="quiz-lez" data-id="${l.id}">${I('quiz')}Crocette di questa lezione</button></div>` : ''}</div>`);
+    ${S.crocette.some(c => c.lid === l.id) ? `<div class="btns"><button class="btn block" data-act="quiz-lez" data-id="${l.id}">${I('quiz')}Crocette di questa lezione</button></div>` : l.fonte === 'mio' ? `<div class="btns"><button class="btn block" data-act="appunti-claude" data-id="${l.id}">${I('copy')}Copia per Claude: crocette da questi appunti</button></div>` : ''}</div>`);
+  caricaGalleria();
+}
+
+async function caricaGalleria() {
+  for (const im of document.querySelectorAll('img[data-img]')) { if (!im.src) { const d = await imgGet(im.dataset.img); if (d) im.src = d; } }
 }
 
 /* --- crocette --- */
@@ -987,7 +1448,7 @@ function scaricaFile(nome, testo) {
   document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1500);
 }
 const AZ = {
-  tab: el => { ui.tab = el.dataset.v; if (ui.tab !== 'materie') ui.apertaMateria = ''; render(); window.scrollTo(0, 0); },
+  tab: el => { ui.tab = el.dataset.v; if (ui.tab !== 'libretto') ui.apertaMateria = ''; render(); window.scrollTo(0, 0); },
   passo: el => passo(el.dataset.v),
   materia: el => { ui.apertaMateria = el.dataset.id; render(); window.scrollTo(0, 0); },
   'materie-indietro': () => { ui.apertaMateria = ''; render(); },
@@ -999,7 +1460,10 @@ const AZ = {
     const sh = sheet('Su quale esame lavori?', l.map(m => `<button class="item" data-id="${m.id}"><span class="dotc" style="background:${m.colore}"></span><span class="g"><b>${esc(m.nome)}</b><span>${esameDi(m.id) ? 'esame ' + fData(esameDi(m.id).data) : 'senza data'}</span></span>${m.id === S.focus ? I('check') : ''}</button>`).join(''));
     sh.addEventListener('click', e => { const b = e.target.closest('.item'); if (!b) return; S.focus = b.dataset.id; save(); chiudiSheet(); render(); });
   },
-  superato: el => { const m = mat(el.dataset.id); formMateria(m); setTimeout(() => { const b = document.querySelector('#m-stato [data-v="superato"]'); if (b) b.click(); }, 50); },
+  superato: el => formMateria(mat(el.dataset.id), true),
+  filtro: el => { ui.filtro = el.dataset.v; render(); },
+  'piano-incolla': () => formPiano(),
+  inizia: el => { const m = mat(el.dataset.id); m.stato = 'studio'; m.inizio = oggi(); S.focus = m.id; save(); render(); toast('Ora stai preparando ' + m.nome); },
   importa: () => formImporta(),
   istruzioni: () => istruzioni(),
   esempio: async () => {
@@ -1007,6 +1471,10 @@ const AZ = {
     catch (e) { toast('Esempio non disponibile offline'); }
   },
   leggi: el => apriLettura(el.dataset.id),
+  'lez-modifica': el => { const l = S.lezioni.find(x => x.id === el.dataset.id); voce.stop(); chiudiPlayer(); formAppunti(l); },
+  'img-apri': async el => { const d = await imgGet(el.dataset.id); if (d) sheet('Immagine', `<img src="${d}" alt="" style="width:100%;border-radius:12px">`); },
+  'appunti-nuovi': () => formAppunti(null, {}),
+  'appunti-claude': el => { const t = promptAppunti(S.lezioni.find(x => x.id === el.dataset.id)); navigator.clipboard.writeText(t).then(() => toast('Copiato: incollalo in Claude, poi importa il pacchetto', 5000), () => sheet('Copia per Claude', `<pre class="code">${esc(t)}</pre>`)); },
   quiz: el => avviaQuiz(el.dataset.id, 20),
   'quiz-lez': el => { const l = S.lezioni.find(x => x.id === el.dataset.id); voce.stop(); avviaQuiz(l.mid, 50, null, l.id); },
   aperte: el => avviaAperte(el.dataset.id, 5),
@@ -1021,7 +1489,9 @@ const AZ = {
   letta: () => {
     const A = PL.attivo, l = S.lezioni.find(x => x.id === A.lid);
     if (!l.letta) { l.letta = true; registra(l.mid, { lette: 1 }); }
-    registra(l.mid, { min: minuti(A.t0) }); if (A.stepId) segnaFatto(A.stepId);
+    l.ripasso = Date.now();
+    registra(l.mid, { min: minuti(A.t0) });
+    if (A.stepId) { segnaFatto(A.stepId); if (!S.oggi.lette) S.oggi.lette = []; if (!S.oggi.lette.includes(l.id)) S.oggi.lette.push(l.id); }
     save(); chiudiPlayer(); toast('Lezione letta ✓');
   },
   voce: () => {
@@ -1065,17 +1535,45 @@ const AZ = {
     }
     S.imp.notifiche = el.checked; save(); if (el.checked) toast('Notifiche attive');
   },
-  backup: () => { scaricaFile('studiofacile-backup-' + oggi() + '.json', JSON.stringify(S)); toast('Backup salvato'); },
+  backup: async () => {
+    const img = {};
+    for (const l of S.lezioni) for (const a of l.allegati || []) { const d = await imgGet(a.id); if (d) img[a.id] = d; }
+    scaricaFile('studiofacile-backup-' + oggi() + '.json', JSON.stringify(Object.assign({}, S, { _img: img }))); toast('Backup salvato');
+  },
   ripristina: () => {
     const i = document.createElement('input'); i.type = 'file'; i.accept = '.json,application/json';
     i.onchange = async () => {
       try { const d = JSON.parse(await i.files[0].text()); if (!d || d.v !== 1 || !Array.isArray(d.materie)) throw new Error();
         if (!confirm('Sostituisco tutti i dati di questo telefono con il backup?')) return;
+        const img = d._img || {}; delete d._img;
+        for (const id of Object.keys(img)) await imgPut(id, img[id]);
         S = Object.assign(statoVuoto(), d); S.imp = Object.assign(statoVuoto().imp, d.imp); save(); render(); toast('Backup ripristinato'); }
       catch (e) { toast('Questo file non è un backup di StudioFacile'); }
     };
     i.click();
   },
+  'studia-comunque': () => { S.oggi.forza = true; save(); render(); },
+  giorno: el => {
+    const g = +el.dataset.v, l = new Set(S.imp.giorni || []);
+    if (l.has(g)) { if (l.size === 1) { toast('Serve almeno un giorno di studio'); return; } l.delete(g); } else l.add(g);
+    S.imp.giorni = [...l].sort(); save(); render();
+  },
+  'voce-prova': () => voce.leggi('Ciao, questa è la voce che userò per leggerti i riassunti. La velocità è ' + String(S.imp.voceVel).replace('.', ',') + '.'),
+  'voce-scegli': () => {
+    const sh = sheet('Voce di lettura', `<div class="field"><label>Voce</label><select class="inp" id="set-voce">${opzioniVoci()}</select></div>
+      <div class="field"><label>Velocità</label><select class="inp" id="set-vel">${[0.8, 0.9, 1, 1.1, 1.2, 1.5, 1.8].map(v => `<option value="${v}" ${+S.imp.voceVel === v ? 'selected' : ''}>${v}×</option>`).join('')}</select></div>
+      <div class="btns"><button class="btn pri block" data-act="sheet-chiudi">Fatto</button></div>`, () => { const b = $('[data-act=voce-vel]'); if (b) b.textContent = S.imp.voceVel + '×'; });
+  },
+  'tesi-inizia': () => { S.tesi = nuovaTesi(); save(); formTesi(); },
+  'tesi-modifica': () => formTesi(),
+  'cap-nuovo': () => formCapitolo(null),
+  'cap-modifica': el => formCapitolo(S.tesi.capitoli.find(c => c.id === el.dataset.id)),
+  'cap-stato': el => { const c = S.tesi.capitoli.find(x => x.id === el.dataset.id); c.st = (c.st + 1) % CAP_STATI.length; save(); render(); },
+  'fase-tesi': el => { const f = S.tesi.fasi.find(x => x.id === el.dataset.id); f.f = !f.f; save(); render(); },
+  'fase-tesi-del': el => { S.tesi.fasi = S.tesi.fasi.filter(x => x.id !== el.dataset.id); save(); render(); },
+  'fase-tesi-add': () => { const i = $('#fase-nuova'); const t = i && i.value.trim(); if (!t) return; S.tesi.fasi.push({ id: uid(), t, f: false }); save(); render(); },
+  'scad-tesi': () => formScadenza(null, { tipo: 'tesi', titolo: '' }),
+  'tesi-claude': () => navigator.clipboard.writeText(promptTesi()).then(() => toast('Copiato: incollalo in una chat con Claude', 4000), () => sheet('Copia per Claude', `<pre class="code">${esc(promptTesi())}</pre>`)),
   'aggiorna-controlla': () => { if (window.AppUpdate) AppUpdate.check().then(n => { if (!n) toast('Hai già l\'ultima versione'); }); }
 };
 document.addEventListener('click', e => {
@@ -1088,6 +1586,14 @@ document.addEventListener('change', e => {
   const el = e.target;
   if (el.dataset.act === 'notifiche') return AZ.notifiche(el);
   if (el.dataset.imp) { const k = el.dataset.imp; S.imp[k] = el.type === 'number' || k === 'minuti' || k === 'avvisoGiorni' ? +el.value : el.value; save(); renderTab(); }
+  if (el.id === 'tesi-note' && S.tesi) { S.tesi.note = el.value; save(); return; }
+  if (el.dataset.ora != null) {
+    const i = +el.dataset.ora; S.imp.orari = [0, 1, 2].map(k => orarioSeduta(k)); S.imp.orari[i] = el.value || '20:30'; S.imp.orariMod = true;
+    if (+S.imp.sedute === 1 || i === 0) S.imp.oraStudio = S.imp.orari[0]; save();
+  }
+  if (el.id === 'set-voce') { S.imp.voceNome = el.value; save(); voce.leggi('Ciao, questa è la voce che userò per leggerti i riassunti.'); }
+  if (el.id === 'set-vel') { S.imp.voceVel = +el.value; save(); }
+  if (el.dataset.imp === 'sedute' || el.dataset.imp === 'minuti') { S.imp[el.dataset.imp] = +el.value; save(); render(); return; }
   if (el.dataset.impB) { S.imp[el.dataset.impB] = el.checked; save(); if (el.checked && !(window.Ponte && Ponte.attivo())) toast('Ricordati di collegare AgendApp'); }
 });
 
@@ -1101,11 +1607,16 @@ function pontePubblica() {
   }
   const m = materiaAttiva();
   if (S.imp.studioInAgenda && m) {
+    const N = Math.max(1, Math.min(3, +S.imp.sedute || 1)), sedOggi = passiDiOggi(m).sedute;
     for (let i = 0; i < 14; i++) {
-      const d = addD(oggi(), i), [h, mi] = String(S.imp.oraStudio || '20:30').split(':').map(Number);
-      const fine = new Date(2000, 0, 1, h, mi + (S.imp.minuti || 30));
-      const fatto = i === 0 && (() => { const { passi } = passiDiOggi(m); return passi.length && passi.every(p => fattoOggi(p.id)); })();
-      eventi.push({ id: 'studio-' + d, tipo: 'appuntamento', titolo: 'StudioFacile · ' + S.imp.minuti + ' min di ' + m.nome, data: d, ora: S.imp.oraStudio, oraFine: pad(fine.getHours()) + ':' + pad(fine.getMinutes()), note: 'Apri StudioFacile: la seduta di oggi è già pronta.', area: 'studio', fatto: !!fatto });
+      const d = addD(oggi(), i);
+      if (!giornoStudio(d)) continue;
+      for (let s = 0; s < N; s++) {
+        const ora = orarioSeduta(s), [h, mi] = ora.split(':').map(Number);
+        const fine = new Date(2000, 0, 1, h, mi + (S.imp.minuti || 30));
+        const fatto = i === 0 && sedOggi[s] && sedOggi[s].passi.every(p => fattoOggi(p.id));
+        eventi.push({ id: 'studio-' + d + (s ? '-' + (s + 1) : ''), tipo: 'appuntamento', titolo: 'StudioFacile · ' + S.imp.minuti + ' min di ' + m.nome + (N > 1 ? ' (' + (s + 1) + '/' + N + ')' : ''), data: d, ora, oraFine: pad(fine.getHours()) + ':' + pad(fine.getMinutes()), note: 'Apri StudioFacile: la seduta è già pronta.', area: 'studio', fatto: !!fatto });
+      }
     }
   }
   return { eventi };
@@ -1139,7 +1650,7 @@ function avviaPonte() {
 async function avvia() {
   const d = await leggiStato();
   if (d && d.v === 1) { S = Object.assign(statoVuoto(), d); S.imp = Object.assign(statoVuoto().imp, d.imp || {}); S.imp.email = Object.assign(statoVuoto().imp.email, (d.imp || {}).email || {}); }
-  if (S.oggi.data !== oggi()) S.oggi = { data: oggi(), fatti: {} };
+  if (S.oggi.data !== oggi()) S.oggi = { data: oggi(), fatti: {}, lette: [], forza: false };
   render();
   avviaPonte();
   setTimeout(controllaPromemoria, 1500);
@@ -1147,7 +1658,7 @@ async function avvia() {
   setTimeout(() => controllaEmail(false), 2500);
   document.addEventListener('visibilitychange', () => {
     if (document.hidden) { salvaOra(); return; }
-    if (S.oggi.data !== oggi()) { S.oggi = { data: oggi(), fatti: {} }; }
+    if (S.oggi.data !== oggi()) { S.oggi = { data: oggi(), fatti: {}, lette: [], forza: false }; }
     if ($('#player').hidden) render();
     controllaPromemoria(); controllaEmail(false);
   });

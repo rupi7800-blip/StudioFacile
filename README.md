@@ -11,6 +11,11 @@ Passa gli esami in tranquillità: **30 minuti al giorno**, un esame alla volta.
 - **Simulazione d'esame** con timer e voto stimato in trentesimi; il **semaforo** diventa verde quando sei pronto per prenotare.
 - **Scadenze**: rette, prenotazione appelli, esami, lezioni di approfondimento. Vanno in **AgendApp** tramite il Ponte.
 - **Email dell'università**: uno script sul tuo Gmail (`google/StudioFacile.gs`) legge solo i mittenti che scegli; l'app propone tipo e data, e tu confermi.
+- **Libretto**: piano di studi (anche incollato dall'area studenti), CFU, anno, esami passati, voti, lodi, idoneità, media aritmetica e ponderata, base di laurea.
+- **Tesi**: dati, capitoli con stato, lista delle cose da fare, scadenze (in AgendApp), appunti e aiuto da Claude.
+- **Sedute**: da 1 a 3 al giorno, ognuna con il suo orario, e i giorni della settimana in cui studiare.
+- **Voce**: scelta tra le voci installate sul telefono e velocità.
+- **Importa**: pacchetti di Claude, appunti scritti da te, PDF, Word, testo e foto (i PDF fatti di immagini vengono salvati pagina per pagina). Le librerie per PDF (pdf.js) e Word (mammoth) sono in `js/lib`.
 - Progressi: esami passati, CFU, media, minuti di studio.
 
 ## I contenuti

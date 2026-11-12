@@ -1,10 +1,11 @@
 {
-  "version": "1.0.0",
-  "date": "11/11/2026",
+  "version": "1.1.0",
+  "date": "12/11/2026",
   "notes": [
-    "Prima versione di StudioFacile",
-    "Piano di 30 minuti al giorno: riassunti, crocette, domande aperte, simulazioni",
-    "Crocette con risposte mescolate a ogni ripasso",
-    "Scadenze universitarie collegate ad AgendApp e lettura delle email dell'università"
+    "Nuovo Libretto: materie con CFU e anno, esami passati, voti, lodi, medie e base di laurea",
+    "Nuova sezione Tesi: dati, capitoli, cose da fare, scadenze e aiuto da Claude",
+    "Scegli la voce di lettura e la velocità",
+    "Scegli quante sedute al giorno e in quali giorni della settimana studiare",
+    "Importa anche i tuoi appunti, PDF, Word, testi e foto"
   ]
 }
