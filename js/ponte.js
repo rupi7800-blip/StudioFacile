@@ -15,6 +15,8 @@
 
    Uso nell'app:
      Ponte.init({ app, pubblica(), ricevi(da, dati), scollega(da), dopo(), toast(msg), descr:{altraApp:'testo'} })
+     facoltativi: stessaApp(pacchetto) se si importa un pacchetto della stessa app,
+                  altroFile(json) per un file che non è un pacchetto (es. un backup dell'app)
      Ponte.cambiato()   dopo ogni salvataggio
      Ponte.apri()       apre il pannello "Collega le app"
    ========================================================= */
@@ -139,32 +141,49 @@
     var p = costruisci(); p.hash = hash(JSON.stringify(p.dati));
     var d = new Date(), nome = 'ponte-' + me + '-' + d.getFullYear() + pad(d.getMonth() + 1) + pad(d.getDate()) + '.json';
     var testo = JSON.stringify(p);
+    var altre_ = altre().map(function (a) { return APPS[a].nome; }).join(', ');
+    function scarica() {
+      var a = document.createElement('a');
+      a.href = URL.createObjectURL(new Blob([testo], { type: 'application/json' })); a.download = nome;
+      document.body.appendChild(a); a.click();
+      setTimeout(function () { URL.revokeObjectURL(a.href); a.remove(); }, 1500);
+      toast('Pacchetto salvato in Download (' + nome + '): aprilo con "Importa pacchetto" in ' + altre_, 6000);
+    }
+    // Su iPhone/Android si usa "Condividi" (Salva in File, Drive, email…). Solo il file, senza testo:
+    // con il testo alcune app (e "Salva in File" su iPhone) salvano il testo al posto del file.
+    // Se la condivisione non parte (errore diverso da "annullato") si scarica il file.
+    var mobile = /iPhone|iPad|Android/.test(navigator.userAgent) || (navigator.maxTouchPoints > 1 && /Mac/.test(navigator.userAgent));
     try {
       var file = new File([testo], nome, { type: 'application/json' });
-      if (navigator.canShare && navigator.canShare({ files: [file] })) {
-        navigator.share({ files: [file], title: 'Pacchetto ' + APPS[me].nome, text: 'Da importare in un\'altra delle tue app collegate' }).catch(function () {});
+      if (mobile && navigator.canShare && navigator.canShare({ files: [file] })) {
+        navigator.share({ files: [file] }).then(function () {
+          toast('Pacchetto pronto: aprilo con "Importa pacchetto" in ' + altre_, 5000);
+        }, function (e) { if (!e || e.name !== 'AbortError') scarica(); });
         return;
       }
     } catch (e) { /* passa al download */ }
-    var a = document.createElement('a');
-    a.href = URL.createObjectURL(new Blob([testo], { type: 'application/json' })); a.download = nome;
-    document.body.appendChild(a); a.click();
-    setTimeout(function () { URL.revokeObjectURL(a.href); a.remove(); }, 1500);
-    toast('Pacchetto salvato: aprilo con "Importa pacchetto" nell\'altra app', 4500);
+    scarica();
   }
   function importa() {
     var i = document.createElement('input'); i.type = 'file'; i.accept = '.json,application/json'; i.multiple = true;
     i.onchange = function () {
       var files = Array.prototype.slice.call(i.files);
       Promise.all(files.map(function (f) { return f.text().then(function (t) { return JSON.parse(t); }).catch(function () { return null; }); })).then(function (lista) {
-        var x = imp(), ok = 0;
+        var x = imp(), ok = 0, gestiti = 0, stessa = 0;
         lista.forEach(function (p) {
-          if (!p || p.v !== V || !APPS[p.app] || p.app === me) return;
+          if (p && p.v === V && p.app === me) { stessa++; try { if (cfg.stessaApp && cfg.stessaApp(p)) gestiti++; } catch (e) { /* no */ } return; }
+          if (p && !(p.v === V && APPS[p.app])) { try { if (cfg.altroFile && cfg.altroFile(p)) gestiti++; } catch (e) { /* no */ } return; }
+          if (!p || p.v !== V || !APPS[p.app]) return;
           var c = pacchetto(p.app);
           if (!c || (p.ts || 0) >= (c.ts || 0)) scrivi(PREF + 'pkt.' + p.app, p);
           x.con[p.app] = true; ok++;
         });
-        if (!ok) { toast('Il file non è un pacchetto delle tue app collegate'); return; }
+        if (!ok) {
+          if (gestiti) return;
+          if (stessa) toast('Questo pacchetto è stato esportato da ' + APPS[me].nome + ' stessa: va importato in ' + altre().map(function (a) { return APPS[a].nome; }).join(', ') + '.', 6000);
+          else toast('Il file non è un pacchetto delle tue app collegate (deve chiamarsi ponte-…json)', 5000);
+          return;
+        }
         if (!x.attivo) { x.attivo = true; }
         salvaImp(x);
         var n = ricevi(false, true);
