@@ -7,6 +7,12 @@
    Quando version.json ha un numero diverso da data-version compare
    il tasto "Aggiorna" e una notifica. Facoltativo: un elemento con
    attributo data-update-slot dove inserire il tasto (es. nell'intestazione).
+   Facoltativo, nell'app: window.AppUpdateHooks = {
+     occupato: () => true/false   // se true (es. esercizio in corso) non apre il riquadro, resta solo il tasto
+     prima: () => Promise         // chiamata prima di ricaricare: salva i dati e il lavoro in corso
+   }
+   L'aggiornamento svuota SOLO le copie dei file dell'app (cache): i dati
+   (IndexedDB, localStorage) non vengono mai toccati.
    ========================================================= */
 (function () {
   'use strict';
@@ -16,7 +22,8 @@
   // version.json sta nella cartella della pagina (non in quella dello script)
   var URL_V = new URL((me && me.dataset.versionUrl) || 'version.json', location.href.split('#')[0].split('?')[0]).href;
   var KEY = 'upd.dismissed.' + location.pathname;
-  var latest = null, btn = null, shown = false;
+  var latest = null, btn = null, shown = false, applying = false;
+  function hooks() { return window.AppUpdateHooks || {}; }
 
   function cmp(a, b) {
     var x = String(a).split('.').map(Number), y = String(b).split('.').map(Number);
@@ -69,6 +76,7 @@
 
   function showCard() {
     if (shown) return;
+    try { if (hooks().occupato && hooks().occupato()) return; } catch (e) { /* no */ }
     shown = true;
     var dismissed = null;
     try { dismissed = localStorage.getItem(KEY); } catch (e) { /* no */ }
@@ -118,22 +126,32 @@
   }
 
   function applyUpdate() {
+    if (applying) return;
+    var occ = false;
+    try { occ = !!(hooks().occupato && hooks().occupato()); } catch (e) { /* no */ }
+    if (occ && !confirm('Stai lavorando: salvo quello che hai fatto e lo riprendi subito dopo l\'aggiornamento.\nSe hai una scheda aperta con testo non ancora salvato, salvala prima.\n\nAggiorno adesso?')) return;
+    applying = true;
     injectCss();
     var busy = document.createElement('div');
     busy.className = 'upd-busy';
     busy.textContent = 'Aggiornamento in corso…';
     document.body.appendChild(busy);
     var page = location.href.split('#')[0].split('?')[0];
+    // 0) prima di tutto l'app salva i dati e il lavoro in corso
+    var salva = Promise.resolve().then(function () { return hooks().prima ? hooks().prima() : null; })
+      .catch(function () {});
+    var limite = new Promise(function (ok) { setTimeout(ok, 8000); });
+    var pronto = Promise.race([salva, limite]);
     // 1) svuota le copie salvate della versione vecchia, solo di QUESTA app
     //    (AgendApp, Smistino e Cartellina stanno sullo stesso indirizzo e ognuna ha le sue)
     var mia = new URL('./', page).href;
-    var clear = window.caches ? caches.keys().then(function (k) {
+    var clear = window.caches ? pronto.then(function () { return caches.keys(); }).then(function (k) {
       return Promise.all(k.map(function (n) {
         return caches.open(n).then(function (c) { return c.keys(); }).then(function (reqs) {
           if (reqs.some(function (q) { return q.url.indexOf(mia) === 0; })) return caches.delete(n);
         });
       }));
-    }).catch(function () {}) : Promise.resolve();
+    }).catch(function () {}) : pronto;
     // 2) scarica di nuovo dalla rete tutti i file dell'app (pagina, script, stili, icone)
     var urls = [page, new URL('index.html', page).href];
     Array.prototype.forEach.call(document.querySelectorAll('script[src],link[href]'), function (el) {
@@ -144,7 +162,7 @@
       return Promise.all(urls.map(function (u) { return fetch(u, { cache: 'reload' }).catch(function () {}); }));
     });
     // 3) attiva l'eventuale service worker nuovo
-    var sw = navigator.serviceWorker ? navigator.serviceWorker.getRegistration().then(function (reg) {
+    var sw = navigator.serviceWorker ? pronto.then(function () { return navigator.serviceWorker.getRegistration(); }).then(function (reg) {
       if (!reg) return;
       return reg.update().catch(function () {}).then(function () {
         if (reg.waiting) reg.waiting.postMessage({ type: 'SKIP_WAITING' });

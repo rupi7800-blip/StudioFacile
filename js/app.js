@@ -62,49 +62,103 @@ const ICONS = {
 };
 const I = (n, cls) => `<svg class="i ${cls || ''}" viewBox="0 0 24 24" aria-hidden="true">${ICONS[n] || ''}</svg>`;
 
-/* ---------------- archivio (IndexedDB, con riserva localStorage) ---------------- */
+/* ---------------- archivio (IndexedDB, con riserva localStorage) ----------------
+   Protezioni contro la perdita dei dati:
+   - se la lettura fallisce l'app NON salva (non sovrascrive i dati veri con uno stato vuoto);
+   - una copia automatica al giorno (ultime 7) e una prima di ogni aggiornamento o sincronizzazione;
+   - archivio "persistente" chiesto al browser, così non lo svuota da solo;
+   - copia nella cartella del dispositivo e, se collegato, sul Google Drive personale. */
 const DBN = 'studiofacile', KEY = 'stato';
+let dbP = null, datiLetti = false, letturaFallita = false;
 function idb() {
-  return new Promise((ok, ko) => {
+  if (dbP) return dbP;
+  dbP = new Promise((ok, ko) => {
     if (!window.indexedDB) return ko(new Error('no idb'));
     const r = indexedDB.open(DBN, 1);
     r.onupgradeneeded = () => r.result.createObjectStore('kv');
-    r.onsuccess = () => ok(r.result);
+    r.onsuccess = () => { const db = r.result; db.onversionchange = () => { db.close(); dbP = null; }; db.onclose = () => { dbP = null; }; ok(db); };
     r.onerror = () => ko(r.error);
+    r.onblocked = () => ko(new Error('archivio bloccato da un\'altra finestra'));
   });
+  dbP.catch(() => { dbP = null; });
+  return dbP;
 }
+async function idbGet(k) {
+  const db = await idb();
+  return new Promise((ok, ko) => { const t = db.transaction('kv').objectStore('kv').get(k); t.onsuccess = () => ok(t.result === undefined ? null : t.result); t.onerror = () => ko(t.error); });
+}
+async function idbPut(k, v) {
+  const db = await idb();
+  return new Promise((ok, ko) => { const t = db.transaction('kv', 'readwrite'); t.objectStore('kv').put(v, k); t.oncomplete = () => ok(true); t.onerror = () => ko(t.error); t.onabort = () => ko(t.error); });
+}
+async function idbDel(k) {
+  const db = await idb();
+  return new Promise(ok => { const t = db.transaction('kv', 'readwrite'); t.objectStore('kv').delete(k); t.oncomplete = () => ok(true); t.onerror = () => ok(false); });
+}
+async function idbChiavi(prefisso) {
+  const db = await idb();
+  return new Promise(ok => { const t = db.transaction('kv').objectStore('kv').getAllKeys(); t.onsuccess = () => ok(t.result.filter(k => typeof k === 'string' && k.indexOf(prefisso) === 0)); t.onerror = () => ok([]); });
+}
+/** { ok: true, d } se la lettura è riuscita (d può essere null = primo avvio); { ok: false } se non riesco a leggere */
 async function leggiStato() {
-  try {
-    const db = await idb();
-    return await new Promise((ok, ko) => { const t = db.transaction('kv').objectStore('kv').get(KEY); t.onsuccess = () => ok(t.result || null); t.onerror = () => ko(t.error); });
-  } catch (e) { try { return JSON.parse(localStorage.getItem('studiofacile.stato')); } catch (er) { return null; } }
+  for (let tentativo = 0; tentativo < 3; tentativo++) {
+    try { return { ok: true, d: await idbGet(KEY) }; }
+    catch (e) { dbP = null; await new Promise(r => setTimeout(r, 300 * (tentativo + 1))); }
+  }
+  try { const d = JSON.parse(localStorage.getItem('studiofacile.stato')); if (d) return { ok: true, d }; } catch (er) { /* no */ }
+  return { ok: false };
 }
 let tSave = null;
+/** da chiamare dopo ogni modifica fatta da te */
 function save() {
+  if (!datiLetti) return;
+  S.mod = Date.now();
   clearTimeout(tSave);
   tSave = setTimeout(salvaOra, 250);
   if (window.Ponte) Ponte.cambiato();
 }
 async function salvaOra() {
+  clearTimeout(tSave);
+  if (!datiLetti) return false;
   const copia = JSON.parse(JSON.stringify(S));
-  try {
-    const db = await idb();
-    await new Promise((ok, ko) => { const t = db.transaction('kv', 'readwrite'); t.objectStore('kv').put(copia, KEY); t.oncomplete = ok; t.onerror = () => ko(t.error); });
-  } catch (e) {
-    try { localStorage.setItem('studiofacile.stato', JSON.stringify(copia)); } catch (er) { toast('Memoria piena: esporta un backup'); }
+  let ok = false;
+  try { await idbPut(KEY, copia); ok = true; try { localStorage.removeItem('studiofacile.stato'); } catch (er) { /* no */ } }
+  catch (e) {
+    try { localStorage.setItem('studiofacile.stato', JSON.stringify(copia)); ok = true; } catch (er) { toast('Memoria piena: esporta un backup'); }
   }
+  salvaInCorso();
+  copiaDelGiorno(copia);
+  cartella.programma();
+  sinc.programma();
+  return ok;
+}
+/* copie automatiche dentro l'app: una al giorno (ultime 7) + quelle prima di aggiornamenti e sincronizzazioni */
+const contaStato = d => ({ materie: (d.materie || []).length, lezioni: (d.lezioni || []).length, crocette: (d.crocette || []).length, scad: (d.scad || []).length });
+async function copiaDelGiorno(copia) {
+  try {
+    const k = 'copia:' + oggi();
+    if (await idbGet(k)) return;
+    if (!copia.materie.length && !copia.lezioni.length && !copia.scad.length && !copia.tesi) return;
+    await idbPut(k, { ts: Date.now(), motivo: 'Copia del giorno', stato: copia });
+    const vecchie = (await idbChiavi('copia:2')).sort().reverse().slice(7);
+    for (const v of vecchie) await idbDel(v);
+  } catch (e) { /* no */ }
+}
+async function copiaSpeciale(nome, motivo) {
+  try { await idbPut('copia:' + nome, { ts: Date.now(), motivo, stato: JSON.parse(JSON.stringify(S)) }); } catch (e) { /* no */ }
+}
+async function chiediArchivioPersistente() {
+  try { if (navigator.storage && navigator.storage.persist && !(await navigator.storage.persisted())) await navigator.storage.persist(); } catch (e) { /* no */ }
 }
 
 /* immagini (appunti, foto, pagine dei PDF): salvate a parte per non appesantire lo stato */
 async function imgPut(id, dataUrl) {
-  try { const db = await idb(); await new Promise((ok, ko) => { const t = db.transaction('kv', 'readwrite'); t.objectStore('kv').put(dataUrl, 'img:' + id); t.oncomplete = ok; t.onerror = () => ko(t.error); }); return true; }
+  try { await idbPut('img:' + id, dataUrl); cartella.programma(); return true; }
   catch (e) { toast('Non riesco a salvare l\'immagine'); return false; }
 }
-async function imgGet(id) {
-  try { const db = await idb(); return await new Promise(ok => { const t = db.transaction('kv').objectStore('kv').get('img:' + id); t.onsuccess = () => ok(t.result || null); t.onerror = () => ok(null); }); }
-  catch (e) { return null; }
-}
-async function imgDel(id) { try { const db = await idb(); db.transaction('kv', 'readwrite').objectStore('kv').delete('img:' + id); } catch (e) { /* no */ } }
+async function imgGet(id) { try { return await idbGet('img:' + id); } catch (e) { return null; } }
+async function imgDel(id) { try { await idbDel('img:' + id); } catch (e) { /* no */ } }
+const idImmagini = () => { const l = []; S.lezioni.forEach(x => (x.allegati || []).forEach(a => l.push(a.id))); return l; };
 function riduciImmagine(src, max) {
   return new Promise((ok, ko) => {
     const im = new Image();
@@ -161,7 +215,7 @@ function statoVuoto() {
       email: { url: '', codice: '', mittenti: [], giorni: 60, ultimo: 0 } },
     materie: [], focus: '', lezioni: [], crocette: [], aperte: [], srs: {}, sim: [], log: {},
     oggi: { data: '', fatti: {}, lette: [], forza: false }, scad: [], posta: [], notificati: {},
-    tesi: null
+    tesi: null, mod: 0
   };
 }
 let S = statoVuoto();
@@ -528,9 +582,9 @@ function vOggi() {
   const saluto = (h < 13 ? 'Buongiorno' : h < 18 ? 'Buon pomeriggio' : 'Buonasera') + nome;
   const N = Math.max(1, Math.min(3, +S.imp.sedute || 1));
   let html = `<div class="hello"><h1>${saluto}</h1><p>${giornoStudio() || (S.oggi.data === oggi() && S.oggi.forza) ? (N > 1 ? N + ' sedute da ' + S.imp.minuti + ' minuti' : S.imp.minuti + ' minuti') + ' oggi, e un esame alla volta.' : 'Oggi è giorno libero.'}</p></div>`;
-  html += bannerScadenze();
+  html += bannerDati() + bannerScadenze();
   if (!m) {
-    if (!S.materie.length) return html + `<div class="card empty"><h3>Iniziamo dal primo esame</h3><p>Scegli l'esame più facile, non il più importante. Aggiungilo e importa il pacchetto che ti preparo da Claude.</p>
+    if (!S.materie.length) return html + `<div class="card"><h3>Hai già usato StudioFacile?</h3><p class="sub">Riprendi i tuoi dati da un altro dispositivo, dalla cartella StudioFacile o da un backup.</p><div class="btns"><button class="btn" data-act="sinc-collega">Collega PC e telefono</button>${cartella.supporto() ? '<button class="btn" data-act="cartella-scegli">Cartella StudioFacile</button>' : ''}<button class="btn" data-act="ripristina">Backup</button><button class="btn ghost" data-act="copie">Copie automatiche</button></div></div><div class="card empty"><h3>Iniziamo dal primo esame</h3><p>Scegli l'esame più facile, non il più importante. Aggiungilo e importa il pacchetto che ti preparo da Claude.</p>
       <div class="btns"><button class="btn pri" data-act="materia-nuova">${I('plus')}Aggiungi esame</button><button class="btn" data-act="importa">${I('upload')}Importa pacchetto</button></div>
       <p class="small" style="margin-top:14px">Vuoi provare subito? <button class="btn ghost sm" data-act="esempio">Carica un esempio</button></p></div>` + vProgressi();
     return html + `<div class="card empty"><h3>Nessun esame in corso</h3><p>Hai superato tutto quello che avevi in lista. Aggiungi il prossimo esame.</p><div class="btns"><button class="btn pri" data-act="materia-nuova">${I('plus')}Prossimo esame</button></div></div>` + vProgressi();
@@ -817,10 +871,12 @@ function vAltro() {
   </div>
   <div class="card"><h3>Email dell'università</h3><p class="sub">${e.url ? (e.ultimo ? 'Ultimo controllo ' + new Date(e.ultimo).toLocaleString('it-IT', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : 'Script collegato') + ' · ' + e.mittenti.length + ' mittent' + (e.mittenti.length === 1 ? 'e' : 'i') : 'Non ancora collegata'}</p>
     <div class="btns"><button class="btn ${e.url ? '' : 'pri'}" data-act="email-setup">${I('mail')}${e.url ? 'Mittenti e collegamento' : 'Collega le email'}</button></div></div>
+  ${vDati()}
   <div class="card"><h3>Contenuti e backup</h3>
     <div class="btns"><button class="btn" data-act="importa">${I('upload')}Importa pacchetto</button><button class="btn" data-act="istruzioni">Istruzioni per Claude</button></div>
     <div class="btns"><button class="btn" data-act="backup">Esporta backup</button><button class="btn" data-act="ripristina">Ripristina backup</button></div>
-    <p class="sub" style="margin-top:12px">Tutto resta su questo telefono. Fai un backup ogni tanto, soprattutto prima di cambiare telefono.</p></div>
+    <div class="btns"><button class="btn ghost" data-act="copie">${I('refresh')}Copie automatiche</button></div>
+    <p class="sub" style="margin-top:12px">I dati restano sui tuoi dispositivi (e sul tuo Google Drive se colleghi PC e telefono). Gli aggiornamenti dell'app non li toccano: prima di ogni aggiornamento l'app fa comunque una copia.</p></div>
   <p class="small muted" style="text-align:center">StudioFacile ${window.AppUpdate ? AppUpdate.current : ''} · <button class="btn ghost sm" data-act="aggiorna-controlla">Controlla aggiornamenti</button></p>`;
 }
 
@@ -1201,7 +1257,7 @@ function apriPlayer(html) { const p = $('#player'); p.hidden = false; p.innerHTM
 function chiudiPlayer() {
   voce.stop();
   if (PL.attivo && PL.attivo.timer) clearInterval(PL.attivo.timer);
-  PL.attivo = null; const p = $('#player'); p.hidden = true; p.innerHTML = ''; document.body.style.overflow = ''; render();
+  PL.attivo = null; salvaInCorso(); const p = $('#player'); p.hidden = true; p.innerHTML = ''; document.body.style.overflow = ''; render();
 }
 function testa(titolo, sotto, destra) {
   return `<div class="pl-h"><button class="x" data-act="pl-chiudi" aria-label="Chiudi">×</button><div class="g"><b>${titolo}</b><span>${sotto || ''}</span></div>${destra || ''}</div>`;
@@ -1341,6 +1397,7 @@ function rispondi(oi) {
 }
 function fineQuiz() {
   const A = PL.attivo, min = minuti(A.t0);
+  A.finito = true;
   registra(A.mid, { min });
   if (A.stepId) segnaFatto(A.stepId);
   save();
@@ -1378,6 +1435,7 @@ function mostraAperta() {
 }
 function fineAperte() {
   const A = PL.attivo, min = minuti(A.t0);
+  A.finito = true;
   registra(A.mid, { min, aperte: A.voti.length });
   if (A.stepId) segnaFatto(A.stepId);
   save();
@@ -1442,10 +1500,36 @@ function passo(id) {
   if (x.tipo === 'aperte') return avviaAperte(m.id, x.n, x.id);
   if (x.tipo === 'sim') return avviaSim(m.id, x.id);
 }
+/** backup esportato, file della cartella o pacchetto con i dati completi: true se l'ha riconosciuto */
+const eBackup = d => !!d && ((d.v === 1 && Array.isArray(d.materie)) || (d.formato === 'studiofacile-dati' && d.stato && Array.isArray(d.stato.materie)));
+async function ripristinaDa(d) {
+  if (!eBackup(d)) { toast('Questo file non è un backup di StudioFacile'); return false; }
+  const img = d._img || {}, st = d.stato || d;
+  const c = contaStato(st);
+  if (!confirm(`Sostituisco i dati di questo dispositivo con il backup (${c.materie} esami, ${c.lezioni} lezioni, ${c.crocette} crocette)? Quelli attuali restano tra le copie automatiche.`)) return false;
+  if (!datiLetti) { datiLetti = true; letturaFallita = false; }
+  await copiaSpeciale('prima-ripristino', 'Prima di un ripristino');
+  const pulito = Object.assign({}, st); delete pulito._img;
+  for (const id of Object.keys(img)) await idbPut('img:' + id, img[id]).catch(() => {});
+  caricaStato(pulito); S.mod = Date.now(); await salvaOra(); if (window.Ponte) Ponte.cambiato(); render(); toast('Backup ripristinato');
+  return true;
+}
 function scaricaFile(nome, testo) {
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(new Blob([testo], { type: 'application/json' })); a.download = nome;
-  document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1500);
+  const scarica = () => {
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([testo], { type: 'application/json' })); a.download = nome;
+    document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1500);
+  };
+  // su telefono (soprattutto iPhone) il download di un file dall'app installata non funziona bene: uso "Condividi" → Salva in File
+  const mobile = /iPhone|iPad|Android/.test(navigator.userAgent) || (navigator.maxTouchPoints > 1 && /Mac/.test(navigator.userAgent));
+  try {
+    const f = new File([testo], nome, { type: 'application/json' });
+    if (mobile && navigator.canShare && navigator.canShare({ files: [f] })) {
+      return navigator.share({ files: [f] }).then(() => true, e => { if (e.name === 'AbortError') return false; scarica(); return true; });
+    }
+  } catch (e) { /* scarico */ }
+  scarica();
+  return Promise.resolve(true);
 }
 const AZ = {
   tab: el => { ui.tab = el.dataset.v; if (ui.tab !== 'libretto') ui.apertaMateria = ''; render(); window.scrollTo(0, 0); },
@@ -1538,16 +1622,12 @@ const AZ = {
   backup: async () => {
     const img = {};
     for (const l of S.lezioni) for (const a of l.allegati || []) { const d = await imgGet(a.id); if (d) img[a.id] = d; }
-    scaricaFile('studiofacile-backup-' + oggi() + '.json', JSON.stringify(Object.assign({}, S, { _img: img }))); toast('Backup salvato');
+    if (await scaricaFile('studiofacile-backup-' + oggi() + '.json', JSON.stringify(Object.assign({}, S, { _img: img })))) toast('Backup salvato');
   },
   ripristina: () => {
     const i = document.createElement('input'); i.type = 'file'; i.accept = '.json,application/json';
     i.onchange = async () => {
-      try { const d = JSON.parse(await i.files[0].text()); if (!d || d.v !== 1 || !Array.isArray(d.materie)) throw new Error();
-        if (!confirm('Sostituisco tutti i dati di questo telefono con il backup?')) return;
-        const img = d._img || {}; delete d._img;
-        for (const id of Object.keys(img)) await imgPut(id, img[id]);
-        S = Object.assign(statoVuoto(), d); S.imp = Object.assign(statoVuoto().imp, d.imp); save(); render(); toast('Backup ripristinato'); }
+      try { ripristinaDa(JSON.parse(await i.files[0].text())); }
       catch (e) { toast('Questo file non è un backup di StudioFacile'); }
     };
     i.click();
@@ -1574,6 +1654,16 @@ const AZ = {
   'fase-tesi-add': () => { const i = $('#fase-nuova'); const t = i && i.value.trim(); if (!t) return; S.tesi.fasi.push({ id: uid(), t, f: false }); save(); render(); },
   'scad-tesi': () => formScadenza(null, { tipo: 'tesi', titolo: '' }),
   'tesi-claude': () => navigator.clipboard.writeText(promptTesi()).then(() => toast('Copiato: incollalo in una chat con Claude', 4000), () => sheet('Copia per Claude', `<pre class="code">${esc(promptTesi())}</pre>`)),
+  'cartella-scegli': () => cartella.scegli(),
+  'cartella-riattiva': () => cartella.riattiva(),
+  'cartella-ripristina': () => cartella.ripristina(),
+  'cartella-scollega': () => { if (confirm('Smetto di salvare nella cartella? I file già salvati restano.')) cartella.scollega(); },
+  'sinc-collega': () => formSinc(),
+  'sinc-ora': () => sinc.esegui(true),
+  'sinc-scegli': () => sinc.scegliVersione(),
+  'sinc-scollega': () => { if (confirm('Questo dispositivo smette di sincronizzarsi. I dati restano qui e sul Drive.')) sinc.scollega(); },
+  copie: () => copieAutomatiche(),
+  ricarica: () => location.reload(),
   'aggiorna-controlla': () => { if (window.AppUpdate) AppUpdate.check().then(n => { if (!n) toast('Hai già l\'ultima versione'); }); }
 };
 document.addEventListener('click', e => {
@@ -1596,6 +1686,339 @@ document.addEventListener('change', e => {
   if (el.dataset.imp === 'sedute' || el.dataset.imp === 'minuti') { S.imp[el.dataset.imp] = +el.value; save(); render(); return; }
   if (el.dataset.impB) { S.imp[el.dataset.impB] = el.checked; save(); if (el.checked && !(window.Ponte && Ponte.attivo())) toast('Ricordati di collegare AgendApp'); }
 });
+
+/* ---------------- lavoro in corso: sopravvive ad aggiornamenti e chiusure ---------------- */
+function serializzaPL() {
+  const A = PL.attivo;
+  if (!A || A.finito) return null;
+  const base = { tipo: A.tipo, mid: A.mid || '', stepId: A.stepId || '', t0: A.t0, ts: Date.now() };
+  if (A.tipo === 'lettura') return Object.assign(base, { lid: A.lid, scroll: $('#player').scrollTop || 0 });
+  if (A.tipo === 'quiz') return Object.assign(base, { domande: A.domande.map(d => ({ id: d.c.id, ord: d.ord, bis: !!d.bis })), i: A.i, ok: A.ok, risposto: A.risposto, rimandate: [...A.rimandate], tot: A.tot });
+  if (A.tipo === 'aperte') return Object.assign(base, { lista: A.lista.map(a => a.id), i: A.i, mostra: !!A.mostra, voti: A.voti });
+  if (A.tipo === 'sim') return Object.assign(base, { domande: A.domande.map(d => ({ id: d.c.id, ord: d.ord, r: d.r })), i: A.i, resto: Math.max(0, A.fine - Date.now()) });
+  return null;
+}
+function salvaInCorso() {
+  if (!datiLetti) return;
+  const x = serializzaPL();
+  (x ? idbPut('in-corso', x) : idbDel('in-corso')).catch(() => {});
+}
+function riprendiInCorso(x) {
+  if (!x || Date.now() - (x.ts || 0) > 3 * 3600000) return false;
+  const per = (lista, id) => lista.find(o => o.id === id);
+  if (x.tipo === 'lettura') {
+    if (!per(S.lezioni, x.lid)) return false;
+    apriLettura(x.lid, x.stepId);
+    PL.attivo.t0 = x.t0; $('#player').scrollTop = x.scroll || 0;
+  } else if (x.tipo === 'quiz') {
+    const domande = (x.domande || []).map(d => ({ c: per(S.crocette, d.id), ord: d.ord, bis: d.bis })).filter(d => d.c);
+    if (!domande.length) return false;
+    PL.attivo = { tipo: 'quiz', mid: x.mid, stepId: x.stepId, domande, i: Math.min(x.i, domande.length), ok: x.ok || 0, risposto: x.risposto, rimandate: new Set(x.rimandate || []), t0: x.t0, tot: x.tot || domande.length };
+    mostraQuiz();
+  } else if (x.tipo === 'aperte') {
+    const lista = (x.lista || []).map(id => per(S.aperte, id)).filter(Boolean);
+    if (!lista.length) return false;
+    PL.attivo = { tipo: 'aperte', mid: x.mid, stepId: x.stepId, lista, i: Math.min(x.i, lista.length), mostra: x.mostra, t0: x.t0, voti: x.voti || [] };
+    mostraAperta();
+  } else if (x.tipo === 'sim') {
+    const domande = (x.domande || []).map(d => ({ c: per(S.crocette, d.id), ord: d.ord, r: d.r })).filter(d => d.c);
+    if (!domande.length) return false;
+    PL.attivo = { tipo: 'sim', mid: x.mid, stepId: x.stepId, domande, i: Math.min(x.i, domande.length - 1), t0: x.t0, fine: Date.now() + Math.max(5000, x.resto || 0) };
+    PL.attivo.timer = setInterval(tickSim, 1000);
+    mostraSim();
+  } else return false;
+  toast('Ripreso da dove eri rimasto', 3500);
+  return true;
+}
+// "Aggiorna": prima di ricaricare salva tutto, fa una copia e non interrompe una seduta in corso
+window.AppUpdateHooks = {
+  occupato: () => !$('#player').hidden || !!$('#sheets .sheet-bg'),
+  prima: async () => {
+    if (!datiLetti) return;
+    await salvaOra();
+    await copiaSpeciale('prima-aggiornamento', 'Prima dell\'aggiornamento');
+    await cartella.scriviOra();
+  }
+};
+
+/* ---------------- cartella sul dispositivo ----------------
+   L'utente sceglie (o crea) una cartella, dentro l'app crea "StudioFacile" e ci scrive:
+     studiofacile-dati.json   tutti i dati, aggiornati a ogni modifica
+     immagini/                foto e pagine dei PDF
+     backup/                  una copia al giorno (ultime 14)
+   Funziona dove il browser lo permette (Chrome/Edge su PC, Chrome su Android recenti). */
+const FILE_DATI = 'studiofacile-dati.json';
+const daDataUrl = u => { const [t, b] = String(u).split(','); const bin = atob(b); const a = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) a[i] = bin.charCodeAt(i); return new Blob([a], { type: (t.match(/data:([^;]+)/) || [])[1] || 'image/jpeg' }); };
+async function scriviFile(dir, nome, contenuto) {
+  const fh = await dir.getFileHandle(nome, { create: true });
+  const w = await fh.createWritable();
+  await w.write(contenuto); await w.close();
+}
+async function leggiFileCartella(dir, nome) {
+  try { return await (await (await dir.getFileHandle(nome)).getFile()).text(); } catch (e) { return null; }
+}
+const cartella = {
+  h: null, stato: 'nessuna', scritte: null, t: null, ultima: 0, errore: '',
+  supporto: () => typeof window.showDirectoryPicker === 'function',
+  async init() {
+    if (!this.supporto()) { this.stato = 'non-supportata'; return; }
+    try { this.h = await idbGet('cartella'); } catch (e) { this.h = null; }
+    if (!this.h) { this.stato = 'nessuna'; return; }
+    try { this.stato = (await this.h.queryPermission({ mode: 'readwrite' })) === 'granted' ? 'ok' : 'permesso'; } catch (e) { this.stato = 'permesso'; }
+  },
+  nome() { return this.h ? this.h.name : ''; },
+  async scegli() {
+    let base;
+    try { base = await window.showDirectoryPicker({ id: 'studiofacile', mode: 'readwrite', startIn: 'documents' }); }
+    catch (e) { if (e.name !== 'AbortError') toast('Non riesco ad aprire le cartelle: ' + e.message, 4500); return; }
+    try {
+      const dir = /^studiofacile$/i.test(base.name) ? base : await base.getDirectoryHandle('StudioFacile', { create: true });
+      this.h = dir; this.stato = 'ok'; this.scritte = null;
+      await idbPut('cartella', dir);
+      const trovati = await this.leggi();
+      if (trovati && haDati(trovati.stato) && JSON.stringify(trovati.stato) !== JSON.stringify(S)) {
+        const c = contaStato(trovati.stato);
+        const usa = !haDati(S) || confirm(`Nella cartella ci sono già dati di StudioFacile (salvati ${new Date(trovati.salvato || 0).toLocaleString('it-IT')}: ${c.materie} esami, ${c.lezioni} lezioni, ${c.crocette} crocette).\n\nOK = carico quelli della cartella\nAnnulla = tengo quelli dell'app e aggiorno la cartella`);
+        if (usa) { await copiaSpeciale('prima-cartella', 'Prima di caricare dalla cartella'); await this.carica(trovati); toast('Dati caricati dalla cartella', 4000); return; }
+      }
+      await this.scriviOra(true);
+      render(); toast('Salvo tutto in ' + (dir === base ? '' : base.name + '/') + dir.name, 4500);
+    } catch (e) { toast('Non riesco a scrivere nella cartella: ' + e.message, 5000); }
+  },
+  async riattiva() {
+    if (!this.h) return this.scegli();
+    try { this.stato = (await this.h.requestPermission({ mode: 'readwrite' })) === 'granted' ? 'ok' : 'permesso'; } catch (e) { this.stato = 'permesso'; }
+    if (this.stato === 'ok') { await this.scriviOra(true); toast('Salvataggio nella cartella riattivato'); }
+    render();
+  },
+  async scollega() { this.h = null; this.stato = this.supporto() ? 'nessuna' : 'non-supportata'; await idbDel('cartella').catch(() => {}); render(); toast('Cartella scollegata: i file restano dove sono'); },
+  programma() { if (this.stato !== 'ok') return; clearTimeout(this.t); this.t = setTimeout(() => this.scriviOra(), 2000); },
+  async scriviOra(forza) {
+    clearTimeout(this.t);
+    if (this.stato !== 'ok' || !this.h || !datiLetti) return false;
+    try {
+      const dati = { formato: 'studiofacile-dati', v: 1, salvato: Date.now(), versioneApp: window.AppUpdate ? AppUpdate.current : '', stato: S };
+      const testo = JSON.stringify(dati);
+      await scriviFile(this.h, FILE_DATI, testo);
+      // copia del giorno
+      const bk = await this.h.getDirectoryHandle('backup', { create: true });
+      const nomeBk = 'studiofacile-' + oggi() + '.json';
+      if (forza || !(await leggiFileCartella(bk, nomeBk))) {
+        await scriviFile(bk, nomeBk, testo);
+        const nomi = []; for await (const [n] of bk.entries()) if (/^studiofacile-\d{4}-\d\d-\d\d\.json$/.test(n)) nomi.push(n);
+        for (const n of nomi.sort().reverse().slice(14)) await bk.removeEntry(n).catch(() => {});
+      }
+      // immagini: scrive solo quelle nuove
+      const ids = idImmagini();
+      if (ids.length) {
+        const im = await this.h.getDirectoryHandle('immagini', { create: true });
+        if (!this.scritte) { this.scritte = new Set(); for await (const [n] of im.entries()) this.scritte.add(n.replace(/\.[a-z]+$/, '')); }
+        for (const id of ids) {
+          if (this.scritte.has(id)) continue;
+          const d = await imgGet(id); if (!d) continue;
+          await scriviFile(im, id + '.jpg', daDataUrl(d)); this.scritte.add(id);
+        }
+      }
+      this.ultima = Date.now(); this.errore = '';
+      return true;
+    } catch (e) {
+      if (e.name === 'NotAllowedError' || e.name === 'SecurityError') this.stato = 'permesso';
+      else if (e.name === 'NotFoundError') { this.stato = 'permesso'; this.errore = 'La cartella non si trova più: sceglila di nuovo.'; }
+      else this.errore = e.message;
+      return false;
+    }
+  },
+  async leggi() {
+    if (!this.h) return null;
+    const t = await leggiFileCartella(this.h, FILE_DATI);
+    if (!t) return null;
+    try { const d = JSON.parse(t); return d && d.stato ? d : null; } catch (e) { return null; }
+  },
+  async carica(dati) {
+    caricaStato(dati.stato);
+    // immagini mancanti nell'app
+    try {
+      const im = await this.h.getDirectoryHandle('immagini');
+      for (const id of idImmagini()) {
+        if (await imgGet(id)) continue;
+        try { const f = await (await im.getFileHandle(id + '.jpg')).getFile(); await idbPut('img:' + id, await leggiFileUrl(f)); } catch (e) { /* manca */ }
+      }
+    } catch (e) { /* nessuna immagine */ }
+    await salvaOra(); render();
+  },
+  async ripristina() {
+    if (this.stato === 'permesso') { await this.riattiva(); if (this.stato !== 'ok') return; }
+    const d = await this.leggi();
+    if (!d) { toast('Nella cartella non trovo ' + FILE_DATI); return; }
+    const c = contaStato(d.stato);
+    if (!confirm(`Carico i dati della cartella (salvati ${new Date(d.salvato || 0).toLocaleString('it-IT')}: ${c.materie} esami, ${c.lezioni} lezioni)? Quelli attuali restano tra le copie automatiche.`)) return;
+    await copiaSpeciale('prima-cartella', 'Prima di caricare dalla cartella');
+    await this.carica(d); toast('Dati caricati dalla cartella');
+  }
+};
+const haDati = d => !!d && ((d.materie || []).length || (d.lezioni || []).length || (d.scad || []).length || !!d.tesi);
+function caricaStato(d) {
+  S = Object.assign(statoVuoto(), d);
+  S.imp = Object.assign(statoVuoto().imp, d.imp || {});
+  S.imp.email = Object.assign(statoVuoto().imp.email, (d.imp || {}).email || {});
+  if (S.oggi.data !== oggi()) S.oggi = { data: oggi(), fatti: {}, lette: [], forza: false };
+}
+
+/* ---------------- PC e telefono collegati (tramite il tuo Google Drive) ----------------
+   Lo stesso script Google delle email (google/StudioFacile.gs) salva una copia dei dati
+   nella cartella "StudioFacile" del tuo Google Drive. Ogni dispositivo collegato manda
+   le sue modifiche e riceve quelle degli altri. Nessun server di terzi.
+   Se modifichi su due dispositivi senza connessione, l'app ti chiede quale versione tenere
+   (l'altra resta tra le versioni su Drive e tra le copie automatiche). */
+function nomeDispositivoPredefinito() {
+  const u = navigator.userAgent;
+  return /iPhone/.test(u) ? 'iPhone' : /iPad/.test(u) ? 'iPad' : /Android/.test(u) ? (/Mobile/.test(u) ? 'Telefono Android' : 'Tablet Android') : /Windows/.test(u) ? 'PC Windows' : /Mac/.test(u) ? 'Mac' : /Linux/.test(u) ? 'PC Linux' : 'Computer';
+}
+const sinc = {
+  m: { attivo: false, base: 0, localBase: 0, ultimo: 0, id: '', nome: '' },
+  inCorso: false, t: null, conflitto: null, errore: '',
+  async init() {
+    try { this.m = Object.assign(this.m, (await idbGet('sinc')) || {}); } catch (e) { /* no */ }
+    if (!this.m.id) { this.m.id = uid(); this.m.nome = nomeDispositivoPredefinito(); this.salvaMeta(); }
+  },
+  salvaMeta() { idbPut('sinc', Object.assign({}, this.m)).catch(() => {}); },
+  programma() { if (!this.m.attivo) return; clearTimeout(this.t); this.t = setTimeout(() => this.esegui(false), 8000); },
+  async esegui(manuale) {
+    if (!this.m.attivo || !datiLetti) return;
+    if (this.inCorso) { if (manuale) toast('Sincronizzazione già in corso…'); return; }
+    if (!navigator.onLine) { if (manuale) toast('Sei offline: sincronizzo appena torna la connessione'); return; }
+    this.inCorso = true; clearTimeout(this.t);
+    if (manuale) toast('Sincronizzo…');
+    try {
+      const info = await chiamaScript({ azione: 'sinc-info' });
+      const remoto = info.ver || 0;
+      const cambiatoLi = !!remoto && remoto !== this.m.base;
+      const cambiatoQui = (S.mod || 0) !== this.m.localBase;
+      if (!remoto) await this.manda();
+      else if (cambiatoLi && (!cambiatoQui || !haDati(S))) await this.prendi();
+      else if (!cambiatoLi && cambiatoQui) await this.manda();
+      else if (cambiatoLi && cambiatoQui) { this.conflitto = info; if (manuale || !this.m.base) this.scegliVersione(); else render(); return; }
+      else if (manuale) toast('✓ Tutto già allineato');
+      await this.immagini();
+      this.m.ultimo = Date.now(); this.errore = ''; this.salvaMeta();
+      if ($('#set-sinc')) render();
+    } catch (e) {
+      this.errore = e.message;
+      if (manuale) toast('Sincronizzazione: ' + (/sconosciuta/.test(e.message) ? 'aggiorna lo script Google (vedi istruzioni)' : e.message), 5000);
+    } finally { this.inCorso = false; }
+  },
+  async manda(forza) {
+    if (!S.mod) S.mod = Date.now();
+    const j = await chiamaScript({ azione: 'sinc-scrivi', stato: S, mod: S.mod, base: this.m.base, forza: !!forza, dispositivo: this.m.id, nome: this.m.nome });
+    if (j.conflitto) { this.conflitto = j; throw new Error('un altro dispositivo ha appena salvato: riprova'); }
+    this.m.base = j.ver; this.m.localBase = S.mod; this.conflitto = null; this.salvaMeta();
+  },
+  async prendi() {
+    if (!$('#player').hidden) { this.programma(); return; } // non cambio i dati durante una seduta
+    const j = await chiamaScript({ azione: 'sinc-leggi' });
+    if (!j.stato) return;
+    if (haDati(S)) await copiaSpeciale('prima-sinc', 'Prima di ricevere i dati da ' + (j.nome || 'un altro dispositivo'));
+    const email = Object.assign({}, S.imp.email);
+    caricaStato(j.stato);
+    if (!S.imp.email.url) S.imp.email = email; // il collegamento allo script resta
+    this.m.base = j.ver; this.m.localBase = S.mod || 0; this.conflitto = null; this.salvaMeta();
+    await salvaOra(); render();
+    toast('🔄 Dati aggiornati da ' + (j.nome || 'un altro dispositivo'), 4000);
+  },
+  async immagini() {
+    const ids = idImmagini(); if (!ids.length) return;
+    const lassu = new Set((await chiamaScript({ azione: 'img-lista' })).ids || []);
+    for (const id of ids) if (!lassu.has(id)) { const d = await imgGet(id); if (d) { await chiamaScript({ azione: 'img-scrivi', id, dato: d }); lassu.add(id); } }
+    const mancanti = [];
+    for (const id of ids) if (lassu.has(id) && !(await imgGet(id))) mancanti.push(id);
+    for (let i = 0; i < mancanti.length; i += 5) {
+      const j = await chiamaScript({ azione: 'img-leggi', ids: mancanti.slice(i, i + 5) });
+      for (const [id, d] of Object.entries(j.immagini || {})) await idbPut('img:' + id, d);
+    }
+  },
+  scegliVersione() {
+    const c = this.conflitto || {};
+    const sh = sheet('Quale versione tengo?', `<p class="sub">Hai fatto modifiche sia qui sia su <b>${esc(c.nome || 'un altro dispositivo')}</b>. Scegli quale tenere: l'altra non va persa, resta tra le versioni sul tuo Drive e tra le copie automatiche.</p>
+      <button class="item" data-v="li"><span class="g"><b>Quella di ${esc(c.nome || 'un altro dispositivo')}</b><span>salvata ${c.ver ? new Date(c.ver).toLocaleString('it-IT') : ''}</span></span>${I('next')}</button>
+      <button class="item" data-v="qui"><span class="g"><b>Quella di questo dispositivo (${esc(this.m.nome)})</b><span>ultima modifica ${S.mod ? new Date(S.mod).toLocaleString('it-IT') : '—'}</span></span>${I('next')}</button>`);
+    sh.addEventListener('click', async e => {
+      const b = e.target.closest('[data-v]'); if (!b) return;
+      chiudiSheet(); this.inCorso = true;
+      try { if (b.dataset.v === 'li') await this.prendi(); else { await this.manda(true); toast('✓ Ora tutti i dispositivi avranno questa versione'); } await this.immagini(); this.m.ultimo = Date.now(); this.salvaMeta(); }
+      catch (er) { toast('Sincronizzazione: ' + er.message, 5000); }
+      finally { this.inCorso = false; render(); }
+    });
+  },
+  async collega(url, codice, nome) {
+    const e = S.imp.email;
+    const prima = { url: e.url, codice: e.codice };
+    e.url = url; e.codice = codice;
+    try { await chiamaScript({ azione: 'sinc-info' }); }
+    catch (er) { e.url = prima.url; e.codice = prima.codice; throw new Error(/sconosciuta/.test(er.message) ? 'lo script Google è della versione vecchia: copia di nuovo google/StudioFacile.gs e pubblica una "Nuova versione"' : er.message); }
+    if (prima.url !== url || prima.codice !== codice) await salvaOra();
+    this.m.nome = nome || this.m.nome; this.m.attivo = true; this.m.base = 0; this.m.localBase = -1; this.salvaMeta();
+    await this.esegui(true);
+  },
+  scollega() { this.m.attivo = false; this.conflitto = null; this.salvaMeta(); render(); toast('Questo dispositivo non si sincronizza più'); }
+};
+function formSinc() {
+  const e = S.imp.email;
+  const sh = sheet('Collega PC e telefono', `<p class="sub">StudioFacile tiene una copia dei tuoi dati nella cartella <b>StudioFacile</b> del tuo Google Drive, usando lo stesso script delle email. Su ogni dispositivo (PC, telefono, tablet) apri StudioFacile, inserisci qui gli stessi dati e premi <b>Collega</b>: le modifiche passano da uno all'altro da sole.</p>
+    <div class="field"><label>Nome di questo dispositivo</label><input class="inp" id="s-nome" value="${esc(sinc.m.nome)}"></div>
+    <div class="field"><label>Indirizzo dello script (finisce con /exec)</label><input class="inp" id="s-url" value="${esc(e.url)}" placeholder="https://script.google.com/macros/s/…/exec"></div>
+    <div class="field"><label>Codice segreto</label><input class="inp" id="s-cod" value="${esc(e.codice)}" placeholder="Lo stesso dello script"></div>
+    <div class="btns"><button class="btn pri block" id="s-ok">${sinc.m.attivo ? 'Salva e sincronizza' : 'Collega'}</button></div>
+    <details style="margin-top:14px"><summary style="font-weight:800;cursor:pointer">Come si prepara lo script (una volta sola)</summary><ol class="small" style="padding-left:20px">
+      <li>Apri <strong>script.google.com</strong> con il tuo account Google → Nuovo progetto "StudioFacile" (se l'hai già fatto per le email, apri quello).</li>
+      <li>Cancella tutto e incolla il contenuto aggiornato di <strong>google/StudioFacile.gs</strong>; scrivi in alto la tua parola segreta e Salva.</li>
+      <li>Scegli la funzione <strong>prova</strong> e premi Esegui: accetta i permessi (Gmail e Drive).</li>
+      <li>Esegui il deployment → Nuovo deployment → App web, Esegui come: Me, Chi può accedere: Chiunque. Se esiste già: Gestisci deployment → matita → <strong>Nuova versione</strong>.</li>
+      <li>Copia l'indirizzo /exec e mettilo qui con la parola segreta, su <strong>ogni</strong> dispositivo.</li></ol></details>`);
+  sh.querySelector('#s-ok').onclick = async () => {
+    const url = sh.querySelector('#s-url').value.trim(), cod = sh.querySelector('#s-cod').value.trim(), nome = sh.querySelector('#s-nome').value.trim();
+    if (!/^https:\/\/script\.google(usercontent)?\.com\//.test(url)) { toast('Incolla l\'indirizzo dello script che finisce con /exec'); return; }
+    if (!cod) { toast('Scrivi il codice segreto'); return; }
+    const b = sh.querySelector('#s-ok'); b.disabled = true; b.textContent = 'Collego…';
+    try { await sinc.collega(url, cod, nome); chiudiSheet(); render(); }
+    catch (er) { toast('Non collegato: ' + er.message, 6000); b.disabled = false; b.textContent = 'Collega'; }
+  };
+}
+async function copieAutomatiche() {
+  let chiavi = [];
+  try { chiavi = await idbChiavi('copia:'); } catch (e) { /* no */ }
+  const copie = [];
+  for (const k of chiavi) { const c = await idbGet(k).catch(() => null); if (c && c.stato) copie.push({ k, ts: c.ts, motivo: c.motivo, n: contaStato(c.stato) }); }
+  copie.sort((a, b) => b.ts - a.ts);
+  const sh = sheet('Copie automatiche', `<p class="sub">L'app tiene una copia al giorno (ultimi 7 giorni) e una prima di ogni aggiornamento o sincronizzazione. Toccane una per tornare a quei dati: quelli di adesso diventano a loro volta una copia.</p>` +
+    (copie.length ? copie.map(c => `<button class="item" data-k="${esc(c.k)}"><span class="g"><b>${esc(c.motivo || 'Copia')}</b><span>${new Date(c.ts).toLocaleString('it-IT')} · ${c.n.materie} esami, ${c.n.lezioni} lezioni, ${c.n.crocette} crocette</span></span>${I('refresh')}</button>`).join('') : '<p class="muted">Nessuna copia ancora: la prima si crea oggi stesso.</p>'));
+  sh.addEventListener('click', async e => {
+    const b = e.target.closest('[data-k]'); if (!b) return;
+    if (!confirm('Torno ai dati di questa copia?')) return;
+    const c = await idbGet(b.dataset.k);
+    await copiaSpeciale('prima-ripristino', 'Prima di un ripristino');
+    caricaStato(c.stato); S.mod = Date.now(); await salvaOra(); chiudiSheet(); render(); toast('Dati ripristinati');
+  });
+}
+function vDati() {
+  const c = cartella, s = sinc.m;
+  const statoCartella = c.stato === 'non-supportata'
+    ? 'Questo browser non permette alle app web di scrivere in una cartella (succede su iPhone/iPad e Firefox). Usa "Esporta backup", che puoi salvare in File o Download, oppure collega PC e telefono.'
+    : c.stato === 'nessuna' ? 'Scegli dove salvare: l\'app crea la cartella <b>StudioFacile</b> e ci tiene sempre una copia aggiornata di tutto, anche se il browser cancella i suoi dati.'
+    : c.stato === 'permesso' ? `Cartella <b>${esc(c.nome())}</b>: il browser chiede di nuovo il permesso. ${esc(c.errore)}`
+    : `Salvo tutto in <b>${esc(c.nome())}</b>${c.ultima ? ' · ultimo salvataggio ' + new Date(c.ultima).toLocaleTimeString('it-IT', { hour: '2-digit', minute: '2-digit' }) : ''}${c.errore ? ' · ⚠ ' + esc(c.errore) : ''}`;
+  return `<div class="card" id="set-dati"><h3>Cartella sul dispositivo</h3><p class="sub">${statoCartella}</p>
+    ${c.stato === 'non-supportata' ? '' : `<div class="btns">${c.stato === 'nessuna' ? `<button class="btn pri" data-act="cartella-scegli">Scegli la cartella</button>` : c.stato === 'permesso' ? `<button class="btn pri" data-act="cartella-riattiva">Riattiva</button><button class="btn" data-act="cartella-scegli">Cambia</button>` : `<button class="btn" data-act="cartella-scegli">Cambia</button><button class="btn" data-act="cartella-ripristina">Carica dalla cartella</button><button class="btn ghost" data-act="cartella-scollega">Scollega</button>`}</div>`}</div>
+  <div class="card" id="set-sinc"><h3>PC e telefono collegati</h3><p class="sub">${s.attivo ? `Attivo su <b>${esc(s.nome)}</b>${s.ultimo ? ' · ultima sincronizzazione ' + new Date(s.ultimo).toLocaleString('it-IT', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : ''}${sinc.errore ? ' · ⚠ ' + esc(sinc.errore) : ''}` : 'Usa StudioFacile sul PC e sul telefono con gli stessi dati: le modifiche passano da uno all\'altro tramite il tuo Google Drive.'}</p>
+    ${sinc.conflitto ? `<div class="btns"><button class="btn pri block" data-act="sinc-scegli">Scegli quale versione tenere</button></div>` : ''}
+    <div class="btns">${s.attivo ? `<button class="btn pri" data-act="sinc-ora">${I('refresh')}Sincronizza ora</button><button class="btn" data-act="sinc-collega">Impostazioni</button><button class="btn ghost" data-act="sinc-scollega">Scollega</button>` : `<button class="btn pri" data-act="sinc-collega">Collega PC e telefono</button>`}</div></div>`;
+}
+function bannerDati() {
+  if (!datiLetti) return `<div class="card" style="border:2px solid var(--bad)"><h3>Non riesco a leggere i tuoi dati</h3><p class="sub">Per sicurezza non salvo niente finché non li rileggo: chiudi e riapri l'app. Se il problema resta, ripristina da una copia.</p><div class="btns"><button class="btn pri" data-act="ricarica">Riprova</button><button class="btn" data-act="ripristina">Ripristina backup</button>${cartella.h ? '<button class="btn" data-act="cartella-ripristina">Dalla cartella</button>' : ''}</div></div>`;
+  let h = '';
+  if (cartella.stato === 'permesso') h += `<div class="card"><div class="row"><div class="g"><b>Salvataggio nella cartella in pausa</b><p class="sub" style="margin:2px 0 0">Il browser chiede di nuovo il permesso per ${esc(cartella.nome())}.</p></div><button class="btn sm pri" data-act="cartella-riattiva">Riattiva</button></div></div>`;
+  if (sinc.conflitto) h += `<div class="card"><div class="row"><div class="g"><b>Modifiche su due dispositivi</b><p class="sub" style="margin:2px 0 0">Scegli quale versione tenere.</p></div><button class="btn sm pri" data-act="sinc-scegli">Scegli</button></div></div>`;
+  return h;
+}
 
 /* ---------------- Ponte: collaborazione con AgendApp ---------------- */
 function pontePubblica() {
@@ -1638,6 +2061,14 @@ function avviaPonte() {
   if (!window.Ponte) return;
   Ponte.init({
     app: 'studiofacile', pubblica: pontePubblica, ricevi: ponteRicevi, scollega: () => 0, dopo: render, toast: m => toast(m),
+    // "Importa pacchetto" con un pacchetto di StudioFacile stesso (es. esportato dal telefono e aperto sul PC)
+    stessaApp: () => {
+      toast('Questo pacchetto viene da StudioFacile e serve ad AgendApp. Per avere gli stessi dati su PC e telefono usa "Collega PC e telefono" (o un backup).', 7000);
+      setTimeout(() => { const b = document.querySelector('.pnt-bg'); if (b) b.remove(); formSinc(); }, 400);
+      return true;
+    },
+    // un file che non è un pacchetto del Ponte: se è un backup di StudioFacile lo ripristino
+    altroFile: d => { if (!eBackup(d)) return false; const b = document.querySelector('.pnt-bg'); if (b) b.remove(); ripristinaDa(d); return true; },
     descr: {
       agendapp: 'Riceve rette, prenotazioni degli appelli, esami e lezioni di approfondimento con gli avvisi a schermo intero. Se le segni fatte lì, lo sa anche StudioFacile.',
       smistino: 'Per ora non scambia dati con StudioFacile.',
@@ -1648,20 +2079,33 @@ function avviaPonte() {
 
 /* ---------------- avvio ---------------- */
 async function avvia() {
-  const d = await leggiStato();
-  if (d && d.v === 1) { S = Object.assign(statoVuoto(), d); S.imp = Object.assign(statoVuoto().imp, d.imp || {}); S.imp.email = Object.assign(statoVuoto().imp.email, (d.imp || {}).email || {}); }
+  const r = await leggiStato();
+  await Promise.all([cartella.init(), sinc.init()]).catch(() => {});
+  if (r.ok) {
+    datiLetti = true;
+    if (r.d && r.d.v === 1) caricaStato(r.d);
+    else if (cartella.stato === 'ok') { const f = await cartella.leggi(); if (f && haDati(f.stato)) { await cartella.carica(f); toast('Dati ritrovati nella cartella ' + cartella.nome(), 4500); } }
+  } else letturaFallita = true;
   if (S.oggi.data !== oggi()) S.oggi = { data: oggi(), fatti: {}, lette: [], forza: false };
   render();
+  if (datiLetti) {
+    chiediArchivioPersistente();
+    try { riprendiInCorso(await idbGet('in-corso')); } catch (e) { /* no */ }
+    if (cartella.stato === 'ok') cartella.scriviOra();
+    setTimeout(() => sinc.esegui(false), 1200);
+  }
   avviaPonte();
   setTimeout(controllaPromemoria, 1500);
   setInterval(controllaPromemoria, 60000);
   setTimeout(() => controllaEmail(false), 2500);
   document.addEventListener('visibilitychange', () => {
-    if (document.hidden) { salvaOra(); return; }
+    if (document.hidden) { salvaOra(); cartella.scriviOra(); return; }
     if (S.oggi.data !== oggi()) { S.oggi = { data: oggi(), fatti: {}, lette: [], forza: false }; }
     if ($('#player').hidden) render();
-    controllaPromemoria(); controllaEmail(false);
+    controllaPromemoria(); controllaEmail(false); sinc.esegui(false);
   });
+  window.addEventListener('pagehide', () => { salvaOra(); });
+  window.addEventListener('online', () => sinc.esegui(false));
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
 }
 // per i test
